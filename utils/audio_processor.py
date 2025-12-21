@@ -244,7 +244,7 @@ class AudioProcessor:
         # Add to frame buffer (int16)
         self._frame_buffer = np.concatenate([self._frame_buffer, audio])
         
-        # Limit buffer size to prevent memory issues (max 4 seconds of audio)
+        # Limit buffer size to prevent memory issues (max 1 seconds of audio)
         max_buffer_samples = 1 * self.RNNOISE_SAMPLE_RATE
         if len(self._frame_buffer) > max_buffer_samples:
             self._frame_buffer = self._frame_buffer[-max_buffer_samples:]
