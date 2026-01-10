@@ -1034,11 +1034,126 @@ function init_app() {
             // 先显示选择提示
             showStatusToast(window.t ? window.t('app.deviceSelected', { device: deviceName }) : `已选择 ${deviceName}`, 3000);
             // 延迟重启录音，让用户看到选择提示
-            await stopMicCapture();
-            // 等待一小段时间，确保选择提示显示出来
-            await new Promise(resolve => setTimeout(resolve, 500));
-            if (wasRecording) {
-                await startMicCapture();
+
+            // 保存需要恢复的状态
+            const shouldRestartProactiveVision = proactiveVisionEnabled && isRecording;
+            const shouldRestartScreening = videoSenderInterval !== undefined && videoSenderInterval !== null;
+
+            // 防止并发切换导致状态混乱
+            if (window._isSwitchingMicDevice) {
+                console.warn('设备切换中,请稍后再试');
+                showStatusToast(window.t ? window.t('app.deviceSwitching') : '设备切换中...', 2000);
+                return;
+            }
+            window._isSwitchingMicDevice = true;
+
+            try {
+                // 停止语音期间主动视觉定时
+                stopProactiveVisionDuringSpeech();
+                // 停止屏幕共享
+                stopScreening();
+                // 停止静音检测
+                stopSilenceDetection();
+                // 清理输入analyser
+                inputAnalyser = null;
+                // 停止所有轨道
+                if (stream instanceof MediaStream) {
+                    stream.getTracks().forEach(track => track.stop());
+                    stream = null;
+                }
+                // 清理 AudioContext 本地资源
+                if (audioContext) {
+                    if (audioContext.state !== 'closed') {
+                        await audioContext.close().catch((e) => console.warn('AudioContext close 失败:', e));
+                    }
+                    audioContext = null;
+                }
+                workletNode = null;
+
+                // 等待一小段时间，确保选择提示显示出来
+                await new Promise(resolve => setTimeout(resolve, 500));
+
+                if (wasRecording) {
+                    await startMicCapture();
+
+                    // 重启屏幕共享（如果之前正在共享）
+                    if (shouldRestartScreening) {
+                        if (typeof startScreenSharing === 'function') {
+                            try {
+                                await startScreenSharing();
+                            } catch (e) {
+                                console.warn('重启屏幕共享失败:', e);
+                            }
+                        }
+                    }
+                    // 重启主动视觉（如果之前已启用）
+                    if (shouldRestartProactiveVision) {
+                        startProactiveVisionDuringSpeech();
+                    }
+                }
+            } catch (e) {
+                console.error('切换麦克风设备失败:', e);
+                showStatusToast(window.t ? window.t('app.deviceSwitchFailed') : '设备切换失败', 3000);
+
+                // 完整清理：重置状态
+                isRecording = false;
+                window.isRecording = false;
+
+                // 重置所有按钮状态（参考 stopMicCapture 逻辑）
+                micButton.classList.remove('recording', 'active');
+                muteButton.classList.remove('recording', 'active');
+                screenButton.classList.remove('active');
+                if (stopButton) stopButton.classList.remove('recording', 'active');
+
+                // 同步浮动按钮状态
+                syncFloatingMicButtonState(false);
+                syncFloatingScreenButtonState(false);
+
+                // 启用/禁用按钮状态
+                micButton.disabled = false;
+                muteButton.disabled = true;
+                screenButton.disabled = true;
+                if (stopButton) stopButton.disabled = true;
+
+                // 显示文本输入区域
+                const textInputArea = document.getElementById('text-input-area');
+                if (textInputArea) {
+                    textInputArea.classList.remove('hidden');
+                }
+
+                // 清理资源
+                stopScreening();
+                stopSilenceDetection();
+                inputAnalyser = null;
+
+                if (stream instanceof MediaStream) {
+                    stream.getTracks().forEach(track => track.stop());
+                    stream = null;
+                }
+
+                if (audioContext) {
+                    if (audioContext.state !== 'closed') {
+                        await audioContext.close().catch((err) => console.warn('AudioContext close 失败:', err));
+                    }
+                    audioContext = null;
+                }
+                workletNode = null;
+
+                // 通知后端
+                if (socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ action: 'pause_session' }));
+                }
+
+                // 如果主动搭话/主动视觉已启用，重置并开始定时
+                if (proactiveChatEnabled || proactiveVisionEnabled) {
+                    lastUserInputTime = Date.now();
+                    resetProactiveChatBackoff();
+                }
+
+                window._isSwitchingMicDevice = false;
+                return;
+            } finally {
+                window._isSwitchingMicDevice = false;
             }
         } else {
             // 如果不在录音，直接显示选择提示
@@ -2524,7 +2639,10 @@ function init_app() {
 
     // 停止录屏
     function stopScreening() {
-        if (videoSenderInterval) clearInterval(videoSenderInterval);
+        if (videoSenderInterval) {
+            clearInterval(videoSenderInterval);
+            videoSenderInterval = null;
+        }
     }
 
     // 停止录音
