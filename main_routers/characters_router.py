@@ -1191,6 +1191,87 @@ async def voice_clone(file: UploadFile = File(...), prefix: str = Form(...), ref
         logger.error(f"读取文件到内存失败: {e}")
         return JSONResponse({'error': f'读取文件失败: {e}'}, status_code=500)
     
+    # 检测是否使用本地 TTS（ws/wss 协议）
+    _config_manager = get_config_manager()
+    tts_config = _config_manager.get_model_api_config('tts_custom')
+    base_url = tts_config.get('base_url', '')
+    is_local_tts = tts_config.get('is_custom') and base_url.startswith(('ws://', 'wss://'))
+    
+    if is_local_tts:
+        # ==================== 本地 TTS 注册流程 ====================
+        # 将 ws(s):// 转换为 http(s):// 用于 REST API 调用
+        if base_url.startswith('wss://'):
+            http_base = 'https://' + base_url[6:]
+        else:
+            http_base = 'http://' + base_url[5:]
+        
+        # 移除可能的 /v1/audio/speech/stream 路径，只保留主机部分
+        # 例如: ws://localhost:50000/v1/audio/speech/stream -> http://localhost:50000
+        if '/v1/' in http_base:
+            http_base = http_base.split('/v1/')[0]
+        
+        register_url = f"{http_base}/v1/speakers/register"
+        logger.info(f"使用本地 TTS 注册: {register_url}")
+        
+        try:
+            file_buffer.seek(0)
+            
+            # 根据用户 demo，API 格式：
+            # POST /v1/speakers/register
+            # multipart/form-data: speaker_id, prompt_text, prompt_audio
+            files = {
+                'prompt_audio': (file.filename, file_buffer, 'audio/wav')
+            }
+            data = {
+                'speaker_id': prefix,
+                'prompt_text': f"<|{ref_language}|>" if ref_language != 'ch' else "希望你以后能够做的比我还好呦。"
+            }
+            
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(register_url, data=data, files=files)
+                
+                if resp.status_code == 200:
+                    result = resp.json()
+                    voice_id = prefix  # 本地 TTS 使用 speaker_id 作为 voice_id
+                    
+                    # 保存到本地音色库（使用特殊的 key 标识本地 TTS）
+                    voice_data = {
+                        'voice_id': voice_id,
+                        'prefix': prefix,
+                        'is_local': True,
+                        'created_at': datetime.now().isoformat()
+                    }
+                    try:
+                        _config_manager.save_voice_for_current_api(voice_id, voice_data)
+                        logger.info(f"本地 TTS voice_id 已保存: {voice_id}")
+                    except Exception as save_error:
+                        logger.warning(f"保存 voice_id 到音色库失败（本地 TTS 仍可用）: {save_error}")
+                    
+                    return JSONResponse({
+                        'voice_id': voice_id,
+                        'message': result.get('message', '本地音色注册成功'),
+                        'is_local': True
+                    })
+                else:
+                    error_text = resp.text
+                    logger.error(f"本地 TTS 注册失败: {error_text}")
+                    return JSONResponse({
+                        'error': f'本地 TTS 注册失败: {error_text[:200]}'
+                    }, status_code=resp.status_code)
+                    
+        except httpx.ConnectError as e:
+            logger.error(f"无法连接本地 TTS 服务器: {e}")
+            return JSONResponse({
+                'error': f'无法连接本地 TTS 服务器: {http_base}，请确保服务器已启动'
+            }, status_code=503)
+        except Exception as e:
+            logger.error(f"本地 TTS 注册时发生错误: {e}")
+            return JSONResponse({
+                'error': f'本地 TTS 注册失败: {str(e)}'
+            }, status_code=500)
+    
+    # ==================== 阿里云 TTS 注册流程（原有逻辑） ====================
+    
     # 根据参考音频语言计算 language_hints
     # 对于中文 (ch)，language_hints 为空列表
     # 对于其他语言，language_hints 为包含该语言代码的单元素列表
@@ -1200,10 +1281,11 @@ async def voice_clone(file: UploadFile = File(...), prefix: str = Form(...), ref
         ref_language = 'ch'
     
     language_hints = [] if ref_language == 'ch' else [ref_language]
-    logger.info(f"参考音频语言: {ref_language}, language_hints: {language_hints}")
+    logger.info(f"参考音频语言（阿里云）: {ref_language}, language_hints: {language_hints}")
 
 
     def validate_audio_file(file_buffer: io.BytesIO, filename: str) -> tuple[str, str]:
+
         """
         验证音频文件类型和格式
         返回: (mime_type, error_message)
