@@ -989,7 +989,7 @@ async def update_catgirl(name: str, request: Request):
     # 只更新前端传来的字段，未传字段保留原值，且不允许通过此接口修改 system_prompt
     removed_fields = []
     for k, v in characters['猫娘'][name].items():
-        if k not in data and k not in ('档案名', 'system_prompt', 'voice_id', 'live2d'):
+        if k not in data and k not in ('档案名', 'system_prompt', 'voice_id', 'live2d', 'model_type', 'vrm', 'vrm_animation', 'lighting', 'live2d_item_id'):
             removed_fields.append(k)
     for k in removed_fields:
         characters['猫娘'][name].pop(k)
