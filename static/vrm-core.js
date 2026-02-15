@@ -740,14 +740,15 @@ class VRMCore {
                         scl.x > 0 && scl.y > 0 && scl.z > 0) {
                         // 检查是否需要跨分辨率缩放归一化
                         const savedViewport = preferences.viewport;
-                        const currentHeight = window.innerHeight;
-                        if (savedViewport &&
-                            Number.isFinite(savedViewport.height) && savedViewport.height > 0 &&
-                            Math.abs(currentHeight / savedViewport.height - 1) > 0.01) {
-                            // 视口高度有变化，按比例调整缩放
-                            const hRatio = currentHeight / savedViewport.height;
+                        const currentScreenH = window.screen.height;
+                        // 仅在屏幕分辨率发生"跨代"级别变化时（如 1080p→4K）才归一化缩放
+                        const hRatio = (savedViewport &&
+                            Number.isFinite(savedViewport.height) && savedViewport.height > 0)
+                            ? currentScreenH / savedViewport.height : 1;
+                        const isExtremeChange = hRatio > 1.8 || hRatio < 0.56;
+                        if (isExtremeChange) {
                             vrm.scene.scale.set(scl.x * hRatio, scl.y * hRatio, scl.z * hRatio);
-                            console.log('[VRM Core] 视口变化，缩放已归一化:', { savedHeight: savedViewport.height, currentHeight, hRatio });
+                            console.log('[VRM Core] 屏幕分辨率大幅变化，缩放已归一化:', { savedHeight: savedViewport?.height, currentScreenH, hRatio });
                         } else {
                             vrm.scene.scale.set(scl.x, scl.y, scl.z);
                         }

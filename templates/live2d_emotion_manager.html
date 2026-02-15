@@ -657,11 +657,61 @@
         let availableExpressions = [];
 
         // i18n 辅助函数
-        function t(key, options) {
+        function t(key, paramsOrFallback) {
+            if (typeof window.t === 'function') {
+                return window.t(key, paramsOrFallback);
+            }
             if (typeof i18next !== 'undefined' && i18next.isInitialized) {
-                return i18next.t(key, options);
+                return i18next.t(key, paramsOrFallback);
+            }
+            if (typeof paramsOrFallback === 'string') {
+                return paramsOrFallback;
             }
             return key;
+        }
+
+        function isI18nReady() {
+            const i18nInstance = window.i18n || (typeof i18next !== 'undefined' ? i18next : null);
+            return typeof window.t === 'function' && !!(i18nInstance && i18nInstance.isInitialized);
+        }
+
+        function waitForI18nReady(timeoutMs = 5000) {
+            return new Promise(resolve => {
+                if (isI18nReady()) {
+                    resolve();
+                    return;
+                }
+
+                let pollTimer = null;
+                let timeoutTimer = null;
+
+                const cleanup = () => {
+                    if (pollTimer) {
+                        clearInterval(pollTimer);
+                        pollTimer = null;
+                    }
+                    if (timeoutTimer) {
+                        clearTimeout(timeoutTimer);
+                        timeoutTimer = null;
+                    }
+                    window.removeEventListener('localechange', onLocaleReady);
+                };
+
+                const onLocaleReady = () => {
+                    if (!isI18nReady()) {
+                        return;
+                    }
+                    cleanup();
+                    resolve();
+                };
+
+                window.addEventListener('localechange', onLocaleReady);
+                pollTimer = setInterval(onLocaleReady, 100);
+                timeoutTimer = setTimeout(() => {
+                    cleanup();
+                    resolve();
+                }, timeoutMs);
+            });
         }
 
         // 显示状态消息
@@ -1036,7 +1086,10 @@
         resetBtn.addEventListener('click', resetConfig);
 
         // 初始化
-        loadModelList();
+        (async () => {
+            await waitForI18nReady();
+            await loadModelList();
+        })();
     </script>
 
     <!-- Driver.js 新手引导库 -->
