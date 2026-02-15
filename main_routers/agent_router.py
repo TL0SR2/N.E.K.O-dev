@@ -10,16 +10,95 @@ Handles agent-related endpoints including:
 """
 
 import logging
+import asyncio
+import json
 
 from fastapi import APIRouter, Request, Body
 from fastapi.responses import JSONResponse
 import httpx
-from datetime import datetime
 from .shared_state import get_session_manager, get_config_manager
-from config import TOOL_SERVER_PORT, USER_PLUGIN_SERVER_PORT
+from config import TOOL_SERVER_PORT, USER_PLUGIN_SERVER_PORT, MAIN_AGENT_EVENT_PORT
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 logger = logging.getLogger("Main")
+_mq_server = None
+
+
+async def _broadcast_ws_message(payload: dict, lanlan_name: str | None = None):
+    session_manager = get_session_manager()
+    targets = []
+    if lanlan_name and lanlan_name in session_manager:
+        targets = [session_manager[lanlan_name]]
+    else:
+        targets = list(session_manager.values())
+    for mgr in targets:
+        try:
+            if mgr.websocket and hasattr(mgr.websocket, "client_state") and mgr.websocket.client_state == mgr.websocket.client_state.CONNECTED:
+                await mgr.websocket.send_json(payload)
+        except Exception:
+            continue
+
+
+async def _handle_main_event_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    try:
+        while True:
+            raw = await reader.readline()
+            if not raw:
+                break
+            try:
+                event = json.loads(raw.decode("utf-8"))
+            except Exception:
+                continue
+            if not isinstance(event, dict):
+                continue
+
+            etype = event.get("type")
+            if etype == "agent_task_status":
+                payload = event.get("payload") or {}
+                # 主动推送任务状态到前端
+                await _broadcast_ws_message({"type": "agent_task_status", "data": payload})
+            elif etype == "task_result":
+                text = (event.get("text") or "").strip()
+                if not text:
+                    continue
+                lanlan = event.get("lanlan_name")
+                _config_manager = get_config_manager()
+                if not lanlan:
+                    _, her_name_current, _, _, _, _, _, _, _, _ = _config_manager.get_character_data()
+                    lanlan = her_name_current
+                session_manager = get_session_manager()
+                mgr = session_manager.get(lanlan)
+                if mgr:
+                    mgr.pending_extra_replies.append(text)
+                await _broadcast_ws_message({"type": "agent_task_result", "text": text, "lanlan_name": lanlan}, lanlan)
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
+@router.on_event("startup")
+async def _startup_agent_router():
+    global _mq_server
+    _mq_server = await asyncio.start_server(
+        _handle_main_event_client,
+        host="127.0.0.1",
+        port=MAIN_AGENT_EVENT_PORT,
+    )
+
+
+@router.on_event("shutdown")
+async def _shutdown_agent_router():
+    global _mq_server
+    if _mq_server is not None:
+        _mq_server.close()
+        try:
+            await _mq_server.wait_closed()
+        except Exception:
+            pass
+        _mq_server = None
 
 
 @router.post('/flags')
@@ -159,61 +238,6 @@ async def proxy_task_detail(task_id: str):
             return r.json()
     except Exception as e:
         return JSONResponse({"error": f"proxy error: {e}"}, status_code=502)
-
-
-# Task status polling endpoint for frontend
-
-@router.get('/task_status')
-async def get_task_status():
-    """Get current task status for frontend polling - returns all tasks with their current status."""
-    try:
-        # Get tasks from tool server using async client with increased timeout
-        async with httpx.AsyncClient(timeout=2.5) as client:
-            r = await client.get(f"http://localhost:{TOOL_SERVER_PORT}/tasks")
-            if not r.is_success:
-                return JSONResponse({"tasks": [], "error": f"tool_server responded {r.status_code}"}, status_code=502)
-            
-            tasks_data = r.json()
-            tasks = tasks_data.get("tasks", [])
-            debug_info = tasks_data.get("debug", {})
-            
-            # Enhance task data with additional information if needed
-            enhanced_tasks = []
-            for task in tasks:
-                enhanced_task = {
-                    "id": task.get("id"),
-                    "status": task.get("status", "unknown"),
-                    "type": task.get("type", "unknown"),
-                    "lanlan_name": task.get("lanlan_name"),
-                    "start_time": task.get("start_time"),
-                    "end_time": task.get("end_time"),
-                    "params": task.get("params", {}),
-                    "result": task.get("result"),
-                    "error": task.get("error"),
-                    "source": task.get("source", "unknown")  # 添加来源信息
-                }
-                enhanced_tasks.append(enhanced_task)
-            
-            return {
-                "success": True,
-                "tasks": enhanced_tasks,
-                "total_count": len(enhanced_tasks),
-                "running_count": len([t for t in enhanced_tasks if t.get("status") == "running"]),
-                "queued_count": len([t for t in enhanced_tasks if t.get("status") == "queued"]),
-                "completed_count": len([t for t in enhanced_tasks if t.get("status") == "completed"]),
-                "failed_count": len([t for t in enhanced_tasks if t.get("status") == "failed"]),
-                "timestamp": datetime.now().isoformat(),
-                "debug": debug_info  # 传递调试信息到前端
-            }
-        
-    except Exception as e:
-        return JSONResponse({
-            "success": False,
-            "tasks": [],
-            "error": f"Failed to fetch task status: {str(e)}",
-            "timestamp": datetime.now().isoformat()
-        }, status_code=500)
-
 
 
 @router.post('/admin/control')

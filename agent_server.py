@@ -6,6 +6,7 @@ mimetypes.add_type("application/javascript", ".js")
 import asyncio
 import uuid
 import logging
+import json
 from typing import Dict, Any, Optional
 from datetime import datetime
 import time
@@ -15,7 +16,8 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
-from config import TOOL_SERVER_PORT, MAIN_SERVER_PORT ,USER_PLUGIN_SERVER_PORT
+from config import TOOL_SERVER_PORT, USER_PLUGIN_SERVER_PORT, AGENT_MQ_PORT
+from brain.main_bridge import publish_main_event
 from brain.processor import Processor
 from brain.planner import TaskPlanner
 from brain.analyzer import ConversationAnalyzer
@@ -55,6 +57,112 @@ class Modules:
     notification: Optional[str] = None
     # 使用统一的速率限制日志记录器（业务逻辑层面）
     throttled_logger: "ThrottledLogger" = None  # 延迟初始化
+    mq_server: Optional[asyncio.AbstractServer] = None
+    status_broadcast_task: Optional[asyncio.Task] = None
+    last_status_payload: Optional[str] = None
+
+
+def _build_task_status_payload() -> Dict[str, Any]:
+    items = []
+    for tid, info in Modules.task_registry.items():
+        try:
+            items.append({
+                "id": info.get("id", tid),
+                "type": info.get("type"),
+                "status": info.get("status"),
+                "start_time": info.get("start_time"),
+                "params": info.get("params"),
+                "result": info.get("result"),
+                "error": info.get("error"),
+                "lanlan_name": info.get("lanlan_name"),
+                "source": "runtime",
+            })
+        except Exception:
+            continue
+    if Modules.planner and hasattr(Modules.planner, "task_pool"):
+        for tid, task in Modules.planner.task_pool.items():
+            try:
+                task_dict = task.__dict__ if hasattr(task, "__dict__") else {}
+                items.append({
+                    "id": task_dict.get("id", tid),
+                    "status": task_dict.get("status", "queued"),
+                    "original_query": task_dict.get("original_query"),
+                    "meta": task_dict.get("meta"),
+                    "source": "planner",
+                })
+            except Exception:
+                continue
+
+    payload = {
+        "success": True,
+        "tasks": items,
+        "total_count": len(items),
+        "running_count": len([t for t in items if t.get("status") == "running"]),
+        "queued_count": len([t for t in items if t.get("status") == "queued"]),
+        "completed_count": len([t for t in items if t.get("status") == "completed"]),
+        "failed_count": len([t for t in items if t.get("status") == "failed"]),
+        "timestamp": datetime.now().isoformat(),
+    }
+    return payload
+
+
+async def _emit_task_result(lanlan_name: Optional[str], text: str) -> None:
+    if not text:
+        return
+    await publish_main_event({
+        "type": "task_result",
+        "lanlan_name": lanlan_name,
+        "text": text[:240],
+    })
+
+
+async def _task_status_broadcast_loop():
+    while True:
+        try:
+            await asyncio.sleep(0.8)
+            payload = _build_task_status_payload()
+            payload_str = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+            if payload_str == Modules.last_status_payload:
+                continue
+            ok = await publish_main_event({
+                "type": "agent_task_status",
+                "payload": payload,
+            })
+            if ok:
+                Modules.last_status_payload = payload_str
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(1.0)
+
+
+async def _handle_agent_mq_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    try:
+        while True:
+            raw = await reader.readline()
+            if not raw:
+                break
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("type") != "analyze_and_plan":
+                continue
+            messages = payload.get("messages", [])
+            lanlan_name = payload.get("lanlan_name")
+            if not isinstance(messages, list):
+                continue
+            if not Modules.analyzer_enabled:
+                continue
+            asyncio.create_task(_background_analyze_and_plan(messages, lanlan_name))
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
 def _collect_existing_task_descriptions(lanlan_name: Optional[str] = None) -> list[tuple[str, str]]:
     """Return list of (task_id, description) for queued/running tasks, optionally filtered by lanlan_name."""
     items: list[tuple[str, str]] = []
@@ -220,11 +328,7 @@ def _spawn_task(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 if result.get("can_execute"):
                     summary = f'你的任务\"{query[:50]}\"已完成'
                     try:
-                        async with httpx.AsyncClient(timeout=0.5) as _client:
-                            await _client.post(
-                                f"http://localhost:{MAIN_SERVER_PORT}/api/agent/notify_task_result",
-                                json={"text": summary[:240], "lanlan_name": info.get("lanlan_name")},
-                            )
+                        await _emit_task_result(info.get("lanlan_name"), summary[:240])
                     except Exception:
                         pass
                 logger.info(f"[MCP] ✅ Spawned processor task {task_id} completed")
@@ -313,11 +417,7 @@ async def _poll_results_loop():
                             summary = f"你的任务 “{desc}” 已完成"[:240]
                     except Exception:
                         pass
-                    async with httpx.AsyncClient(timeout=0.5) as _client:
-                        await _client.post(
-                            f"http://localhost:{MAIN_SERVER_PORT}/api/agent/notify_task_result",
-                            json={"text": summary, "lanlan_name": info.get("lanlan_name")},
-                        )
+                    await _emit_task_result(info.get("lanlan_name"), summary)
                 except Exception:
                     pass
         except Exception:
@@ -430,11 +530,7 @@ async def _background_analyze_and_plan(messages: list[dict[str, Any]], lanlan_na
                 
                 # 通知 main_server
                 try:
-                    async with httpx.AsyncClient(timeout=0.5) as _client:
-                        await _client.post(
-                            f"http://localhost:{MAIN_SERVER_PORT}/api/agent/notify_task_result",
-                            json={"text": summary[:240], "lanlan_name": lanlan_name},
-                        )
+                    await _emit_task_result(lanlan_name, summary[:240])
                     logger.info(f"[TaskExecutor] ✅ MCP task completed and notified: {result.task_description}")
                 except Exception as e:
                     logger.warning(f"[TaskExecutor] Failed to notify main_server: {e}")
@@ -514,8 +610,31 @@ async def startup():
         Modules.poller_task = asyncio.create_task(_poll_results_loop())
     # Start computer-use scheduler
     asyncio.create_task(_computer_use_scheduler_loop())
+    # Start MQ server to receive analyze-and-plan events from main_server.
+    Modules.mq_server = await asyncio.start_server(
+        _handle_agent_mq_client,
+        host="127.0.0.1",
+        port=AGENT_MQ_PORT,
+    )
+    # Start status broadcaster to push task updates to main_server.
+    if Modules.status_broadcast_task is None:
+        Modules.status_broadcast_task = asyncio.create_task(_task_status_broadcast_loop())
     
     logger.info("[Agent] ✅ Agent server started with simplified task executor")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    if Modules.status_broadcast_task is not None:
+        Modules.status_broadcast_task.cancel()
+        Modules.status_broadcast_task = None
+    if Modules.mq_server is not None:
+        Modules.mq_server.close()
+        try:
+            await Modules.mq_server.wait_closed()
+        except Exception:
+            pass
+        Modules.mq_server = None
 
 
 @app.get("/health")
@@ -567,11 +686,7 @@ async def process_query(payload: Dict[str, Any]):
             if result.get('can_execute'):
                 summary = f'你的任务"{query[:50]}"已完成'
                 try:
-                    async with httpx.AsyncClient(timeout=0.5) as _client:
-                        await _client.post(
-                            f"http://localhost:{MAIN_SERVER_PORT}/api/agent/notify_task_result",
-                            json={"text": summary[:240], "lanlan_name": lanlan_name},
-                        )
+                    await _emit_task_result(lanlan_name, summary[:240])
                 except Exception:
                     pass
             logger.info(f"[MCP] ✅ Process task {task_id} completed")
@@ -646,11 +761,7 @@ async def plugin_execute_direct(payload: Dict[str, Any]):
             if accepted:
                 try:
                     summary = f'插件任务 "{plugin_id}" 已接受'
-                    async with httpx.AsyncClient(timeout=0.5) as _client:
-                        await _client.post(
-                            f"http://localhost:{MAIN_SERVER_PORT}/api/agent/notify_task_result",
-                            json={"text": summary[:240], "lanlan_name": lanlan_name},
-                        )
+                    await _emit_task_result(lanlan_name, summary[:240])
                 except Exception:
                     pass
         except Exception as e:

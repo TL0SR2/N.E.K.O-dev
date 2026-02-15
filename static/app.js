@@ -781,6 +781,16 @@ function init_app() {
                             }, 7500); // 7.5秒后执行
                         }
                     }
+                } else if (response.type === 'agent_task_status') {
+                    // main_server 主动推送的 agent 任务状态（替代前端轮询）
+                    if (window.live2dManager && response.data) {
+                        window.live2dManager.updateAgentTaskHUD(response.data);
+                    }
+                } else if (response.type === 'agent_task_result') {
+                    // 任务结果即时通知（正文仍会在下一轮由后端注入）
+                    if (response.text) {
+                        showStatusToast(response.text, 3500);
+                    }
                 } else if (response.type === 'expression') {
                     const lanlan = window.LanLan1;
                     const registry = lanlan && lanlan.registered_expressions;
@@ -6688,15 +6698,12 @@ function init_app() {
         console.log('[App] Agent开关事件监听器绑定完成');
     };
 
-    // Agent 任务 HUD 轮询逻辑
-    let agentTaskPollingInterval = null;
+    // Agent 任务 HUD 推送逻辑（由 WebSocket 事件驱动）
     let agentTaskTimeUpdateInterval = null;
 
-    // 启动任务状态轮询
+    // 启动任务 HUD（无轮询）
     window.startAgentTaskPolling = function () {
-        if (agentTaskPollingInterval) return; // 已经在运行
-
-        console.log('[App] 启动 Agent 任务状态轮询');
+        console.log('[App] 启动 Agent 任务状态展示');
 
         // 确保 HUD 已创建并显示
         if (window.live2dManager) {
@@ -6704,24 +6711,18 @@ function init_app() {
             window.live2dManager.showAgentTaskHUD();
         }
 
-        // 立即执行一次
-        fetchAndUpdateTaskStatus();
+        // 启动时拉取一次初始状态，后续依赖 WebSocket 推送更新
+        fetchAndUpdateTaskStatusOnce();
 
-        // 每 2 秒轮询一次任务状态
-        agentTaskPollingInterval = setInterval(fetchAndUpdateTaskStatus, 2000);
-
-        // 每秒更新运行时间显示
-        agentTaskTimeUpdateInterval = setInterval(updateTaskRunningTimes, 1000);
+        if (!agentTaskTimeUpdateInterval) {
+            // 每秒更新运行时间显示
+            agentTaskTimeUpdateInterval = setInterval(updateTaskRunningTimes, 1000);
+        }
     };
 
-    // 停止任务状态轮询
+    // 停止任务 HUD 更新
     window.stopAgentTaskPolling = function () {
-        console.log('[App] 停止 Agent 任务状态轮询');
-
-        if (agentTaskPollingInterval) {
-            clearInterval(agentTaskPollingInterval);
-            agentTaskPollingInterval = null;
-        }
+        console.log('[App] 停止 Agent 任务状态展示');
 
         if (agentTaskTimeUpdateInterval) {
             clearInterval(agentTaskTimeUpdateInterval);
@@ -6734,21 +6735,32 @@ function init_app() {
         }
     };
 
-    // 获取并更新任务状态
-    async function fetchAndUpdateTaskStatus() {
+    // 启动时获取一次任务状态
+    async function fetchAndUpdateTaskStatusOnce() {
         try {
-            const response = await fetch('/api/agent/task_status');
+            const response = await fetch('/api/agent/tasks');
             if (!response.ok) {
                 console.warn('[App] 获取任务状态失败:', response.status);
                 return;
             }
 
             const data = await response.json();
-            if (data.success && window.live2dManager) {
-                window.live2dManager.updateAgentTaskHUD(data);
+            if (window.live2dManager) {
+                const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+                const payload = {
+                    success: true,
+                    tasks: tasks,
+                    total_count: tasks.length,
+                    running_count: tasks.filter(t => t && t.status === 'running').length,
+                    queued_count: tasks.filter(t => t && t.status === 'queued').length,
+                    completed_count: tasks.filter(t => t && t.status === 'completed').length,
+                    failed_count: tasks.filter(t => t && t.status === 'failed').length,
+                    timestamp: new Date().toISOString()
+                };
+                window.live2dManager.updateAgentTaskHUD(payload);
             }
         } catch (error) {
-            console.warn('[App] 任务状态轮询出错:', error);
+            console.warn('[App] 获取初始任务状态出错:', error);
         }
     }
 

@@ -13,11 +13,12 @@ import time
 import pickle
 import aiohttp
 import logging
-from config import MONITOR_SERVER_PORT, MEMORY_SERVER_PORT, COMMENTER_SERVER_PORT, TOOL_SERVER_PORT
+from config import MONITOR_SERVER_PORT, MEMORY_SERVER_PORT, COMMENTER_SERVER_PORT
 from datetime import datetime
 import json
 import re
 from utils.frontend_utils import replace_blank, is_only_punctuation
+from main_logic.agent_bridge import publish_analyze_and_plan_event
 
 # Setup logger for this module
 logger = logging.getLogger(__name__)
@@ -300,7 +301,7 @@ def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_serv
                                 text_output_cache = ''
                                 if config['monitor'] and sync_ws:
                                     await sync_ws.send_json({'type': 'turn end'})
-                                # 非阻塞地向tool_server发送最近对话，供分析器识别潜在任务
+                                # 非阻塞地向 agent_server 发送最近对话，供分析器识别潜在任务
                                 # 检查是否正在关闭
                                 if not shutdown_event.is_set():
                                     try:
@@ -316,23 +317,18 @@ def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_serv
                                                     continue
                                                 recent.append({'role': item.get('role'), 'text': txt})
                                         if recent:
-                                            async with aiohttp.ClientSession() as session:
-                                                async with session.post(
-                                                    f"http://localhost:{TOOL_SERVER_PORT}/analyze_and_plan",
-                                                    json={'messages': recent, 'lanlan_name': lanlan_name},
-                                                    timeout=aiohttp.ClientTimeout(total=5.0)
-                                                ) as resp:
-                                                    await resp.read()  # 确保响应被完全读取
-                                            logger.debug(f"[{lanlan_name}] 已发送对话到analyzer进行分析")
-                                    except asyncio.TimeoutError:
-                                        logger.debug(f"[{lanlan_name}] 发送到analyzer超时")
+                                            published = await publish_analyze_and_plan_event(recent, lanlan_name)
+                                            if published:
+                                                logger.debug(f"[{lanlan_name}] 已通过MQ发送对话到analyzer进行分析")
+                                            else:
+                                                logger.debug(f"[{lanlan_name}] MQ发送到analyzer失败")
                                     except RuntimeError as e:
                                         if "shutdown" in str(e).lower() or "closed" in str(e).lower():
-                                            logger.info(f"[{lanlan_name}] 进程正在关闭，跳过analyzer请求")
+                                            logger.info(f"[{lanlan_name}] 进程正在关闭，跳过analyzer消息发送")
                                         else:
-                                            logger.debug(f"[{lanlan_name}] 发送到analyzer失败: {e}")
+                                            logger.debug(f"[{lanlan_name}] 发送analyzer消息失败: {e}")
                                     except Exception as e:
-                                        logger.debug(f"[{lanlan_name}] 发送到analyzer失败: {e}")
+                                        logger.debug(f"[{lanlan_name}] 发送analyzer消息失败: {e}")
                                 
                                 # Turn end 时同步新增消息到 Memory Server，使 memory_browser 及时更新（T1/T2 记忆验收）
                                 if not shutdown_event.is_set() and last_synced_index < len(chat_history):
@@ -372,7 +368,7 @@ def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_serv
                                         {'role': 'assistant', 'content': [{'type': 'text', 'text': text_output_cache}]})
                                 text_output_cache = ''
                                 
-                                # 向tool_server发送最近对话，供分析器识别潜在任务（与turn end逻辑相同）
+                                # 向 agent_server 发送最近对话，供分析器识别潜在任务（与turn end逻辑相同）
                                 # 再次检查关闭状态
                                 if not shutdown_event.is_set():
                                     try:
@@ -388,23 +384,18 @@ def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_serv
                                                     continue
                                                 recent.append({'role': item.get('role'), 'text': txt})
                                         if recent:
-                                            async with aiohttp.ClientSession() as session:
-                                                async with session.post(
-                                                    f"http://localhost:{TOOL_SERVER_PORT}/analyze_and_plan",
-                                                    json={'messages': recent, 'lanlan_name': lanlan_name},
-                                                    timeout=aiohttp.ClientTimeout(total=5.0)
-                                                ) as resp:
-                                                    await resp.read()  # 确保响应被完全读取
-                                            logger.debug(f"[{lanlan_name}] 已发送对话到analyzer进行分析 (session end)")
-                                    except asyncio.TimeoutError:
-                                        logger.debug(f"[{lanlan_name}] 发送到analyzer超时 (session end)")
+                                            published = await publish_analyze_and_plan_event(recent, lanlan_name)
+                                            if published:
+                                                logger.debug(f"[{lanlan_name}] 已通过MQ发送对话到analyzer进行分析 (session end)")
+                                            else:
+                                                logger.debug(f"[{lanlan_name}] MQ发送到analyzer失败 (session end)")
                                     except RuntimeError as e:
                                         if "shutdown" in str(e).lower() or "closed" in str(e).lower():
-                                            logger.info(f"[{lanlan_name}] 进程正在关闭，跳过analyzer请求")
+                                            logger.info(f"[{lanlan_name}] 进程正在关闭，跳过analyzer消息发送")
                                         else:
-                                            logger.debug(f"[{lanlan_name}] 发送到analyzer失败: {e} (session end)")
+                                            logger.debug(f"[{lanlan_name}] 发送analyzer消息失败: {e} (session end)")
                                     except Exception as e:
-                                        logger.debug(f"[{lanlan_name}] 发送到analyzer失败: {e} (session end)")
+                                        logger.debug(f"[{lanlan_name}] 发送analyzer消息失败: {e} (session end)")
                                 
                                 # 清理连续的assistant消息（主动搭话未被响应时只保留最后一条）
                                 chat_history = cleanup_consecutive_assistant_messages(chat_history)
