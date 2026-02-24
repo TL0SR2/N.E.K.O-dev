@@ -155,6 +155,8 @@ async def test_simple_text_chat(offline_client, llm_judger):
         logger.info(f"Received response: {full_response}")
         print(f"\tAI:   {full_response[:150]}{'...' if len(full_response) > 150 else ''}")
         
+        assert len(full_response) > 0, "Response should not be empty"
+        
         # Verify with LLM Judger
         passed = llm_judger.judge(
             input_text=prompt,

@@ -573,6 +573,7 @@
         "siliconAssist": "矽基流動：性價比高，支持Agent模式",
         "openaiAssist": "OpenAI：記憶管理能力強",
         "geminiAssist": "Gemini：智能和性價比極高，但國內版不支持",
+        "kimiAssist": "Kimi：國內可用，支持長上下文和視覺",
         "assistApiNote": "注意：隻有阿裏支持自定義語音功能。不建議使用智譜和階躍星辰。",
         "assistApiKeyQwen": "輔助API Key - 阿裏",
         "assistApiKeyOpenai": "輔助API Key - OpenAI",
@@ -580,6 +581,7 @@
         "assistApiKeyStep": "輔助API Key - 階躍星辰",
         "assistApiKeySilicon": "輔助API Key - 矽基流動",
         "assistApiKeyGemini": "輔助API Key - Gemini",
+        "assistApiKeyKimi": "輔助API Key - Kimi",
         "assistApiKeyHint": "（僅當輔助API為{{provider}}時需要填寫）",
         "assistApiKeyPlaceholder": "可選，默認為核心API Key",
         "providerNames": {
@@ -605,7 +607,8 @@
             "glm": "智譜 (GLM)",
             "step": "階躍星辰 (StepFun)",
             "silicon": "矽基流動 (SiliconFlow，性價比高，推薦⭐)",
-            "gemini": "Gemini（谷歌，智能極高，國內版不支持）"
+            "gemini": "Gemini（谷歌，智能極高，國內版不支持）",
+            "kimi": "Kimi（月之暗面，國內可用，支持長上下文）"
         },
         "freeVersionNoApiKey": "免費版無需API Key",
         "pleaseEnterApiKey": "請輸入您的API Key",
@@ -958,7 +961,7 @@
     "voice": {
         "title": "音色注冊",
         "alibabaApiRequired": "⚠️ 此功能需要CosyVoice模型，請在API密鑰設置頁中配置阿里輔助API或本地語音服務器",
-        "selectFile": "選擇本地音頻文件（15秒最佳，請勿超過30秒，wav/mp3格式）",
+        "selectFile": "選擇本地音頻文件（8秒最佳，請勿超過20秒，wav/mp3格式）",
         "customPrefix": "自定義前綴（必填，用於區分音色）",
         "customPrefixNote": "不超過10個字符，隻支持數字和英文字母",
         "prefixPlaceholder": "不超過10個字符，隻支持數字和英文字母",
@@ -1245,11 +1248,11 @@
             "mergeMessages": "閤並消息",
             "proactiveChat": "主動搭話",
             "proactiveVision": "自主視覺",
-            "proactiveVisionChat": "視覺搭話",
+            "proactiveVisionChat": "螢幕分享",
             "proactiveVisionChatTooltip": "需同時開啟主動搭話和自主視覺",
-            "proactiveNewsChat": "新聞搭話",
+            "proactiveNewsChat": "新聞網站",
             "proactiveNewsChatTooltip": "使用熱議話題進行搭話",
-            "proactiveVideoChat": "視頻搭話",
+            "proactiveVideoChat": "影片網站",
             "proactiveVideoChatTooltip": "使用視頻內容進行搭話",
             "agentMaster": "Agent總開關",
             "keyboardControl": "鍵鼠控製",
@@ -1265,7 +1268,17 @@
             "disabled": "{{name}}已關閉",
             "enableFailed": "{{name}}開啓失敗",
             "userPluginAdapting": "用戶插件（開發中）",
-            "moltbotAdapting": "moltbot（開發中）"
+            "moltbotAdapting": "moltbot（開發中）",
+            "chatSettings": "對話設定",
+            "animationSettings": "動畫設定",
+            "renderQuality": "畫質",
+            "renderQualityLow": "低",
+            "renderQualityMedium": "中",
+            "renderQualityHigh": "高",
+            "frameRate": "幀率",
+            "frameRateLow": "30fps",
+            "frameRateMedium": "45fps",
+            "frameRateHigh": "60fps"
         }
     },
     "subtitle": {
@@ -1284,8 +1297,11 @@
             "disabledError": "Agent模式已關閉（部分清理失敗）",
             "enableFailed": "開啓失敗",
             "disconnected": "服務器連接已斷開",
-            "agentDisconnected": "Agent 服務器連接已斷開"
+            "agentDisconnected": "Agent 服務器連接已斷開",
+            "freeModelWarning": "由於限額問題，免費模型使用Agent模式容易阻塞，建議您切換至自費模型。\n\n如果您已經配置好自費API，請嘗試重啟NEKO。",
+            "freeModelWarningTitle": "免費模型提示"
         },
+        "quotaExceeded": "免費 Agent 模型今日試用次數已達上限（{{limit}}次），請明日再試。",
         "taskHud": {
             "title": "Agent 任務",
             "running": "運行中",

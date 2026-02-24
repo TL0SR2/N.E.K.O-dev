@@ -573,6 +573,7 @@
     "siliconAssist": "SiliconFlow: 좋은 가치, 에이전트 모드 지원",
     "openaiAssist": "OpenAI: 강력한 메모리 관리 기능",
     "geminiAssist": "Gemini: 지능과 가치가 뛰어나지만 중국 국내 버전에서는 사용할 수 없음",
+    "kimiAssist": "Kimi: 중국 내 사용 가능, 긴 컨텍스트 및 비전 지원",
     "assistApiNote": "참고: Alibaba만이 사용자 정의 음성 기능을 지원합니다. GLM 및 StepFun은 권장되지 않습니다.",
     "assistApiKeyQwen": "지원 API 키 - Alibaba",
     "assistApiKeyOpenai": "지원 API 키 - OpenAI",
@@ -580,6 +581,7 @@
     "assistApiKeyStep": "지원 API 키 - StepFun",
     "assistApiKeySilicon": "지원 API 키 - SiliconFlow",
     "assistApiKeyGemini": "지원 API 키 - Gemini",
+    "assistApiKeyKimi": "지원 API 키 - Kimi",
     "assistApiKeyHint": "(Assist API가 {{provider}}인 경우에만 필요함)",
     "assistApiKeyPlaceholder": "선택 사항, 기본값은 핵심 API 키입니다.",
     "providerNames": {
@@ -605,7 +607,8 @@
       "glm": "GLM",
       "step": "스텝펀",
       "silicon": "SiliconFlow(좋은 가치, 권장)",
-      "gemini": "Gemini(Google, High Intelligence, 중국에서는 사용할 수 없음)"
+      "gemini": "Gemini(Google, High Intelligence, 중국에서는 사용할 수 없음)",
+      "kimi": "Kimi(Moonshot, 중국 내 사용 가능, 긴 컨텍스트 지원)"
     },
     "freeVersionNoApiKey": "무료 버전에는 API 키가 필요하지 않습니다.",
     "pleaseEnterApiKey": "API 키를 입력하세요.",
@@ -958,7 +961,7 @@
   "voice": {
     "title": "음성 등록",
     "alibabaApiRequired": "⚠️ 이 기능을 사용하려면 CosyVoice 모델이 필요합니다. API 키 설정에서 Alibaba Assist API 또는 로컬 음성 서버를 구성하세요.",
-    "selectFile": "로컬 오디오 파일 선택(15초 권장, 최대 30초, wav/mp3 형식)",
+    "selectFile": "로컬 오디오 파일 선택(8초 권장, 최대 20초, wav/mp3 형식)",
     "customPrefix": "사용자 정의 접두사(필수, 다양한 음성을 구별하는 데 사용됨)",
     "customPrefixNote": "UI : 최대 10자, 숫자, 영문만 가능",
     "prefixPlaceholder": "UI : 최대 10자, 숫자, 영문만 가능",
@@ -1245,11 +1248,11 @@
       "mergeMessages": "메시지 병합",
       "proactiveChat": "사전 예방적 채팅",
       "proactiveVision": "사전 예방적 비전",
-      "proactiveVisionChat": "비전 채팅",
+      "proactiveVisionChat": "화면 공유",
       "proactiveVisionChatTooltip": "사전 예방적 채팅과 사전 예방적 비전을 모두 활성화해야 합니다",
-      "proactiveNewsChat": "뉴스 채팅",
+      "proactiveNewsChat": "뉴스 웹사이트",
       "proactiveNewsChatTooltip": "트렌딩 토픽을 사용하여 채팅",
-      "proactiveVideoChat": "동영상 채팅",
+      "proactiveVideoChat": "동영상 웹사이트",
       "proactiveVideoChatTooltip": "동영상 콘텐츠를 사용하여 채팅",
       "agentMaster": "에이전트 마스터 스위치",
       "keyboardControl": "키보드/마우스 제어",
@@ -1265,7 +1268,17 @@
       "disabled": "{{name}} 비활성화됨",
       "enableFailed": "{{name}} 활성화 실패",
       "userPluginAdapting": "사용자 플러그인(개발 중)",
-      "moltbotAdapting": "moltbot (개발 중)"
+      "moltbotAdapting": "moltbot (개발 중)",
+      "chatSettings": "채팅 설정",
+      "animationSettings": "애니메이션 설정",
+      "renderQuality": "화질",
+      "renderQualityLow": "낮음",
+      "renderQualityMedium": "중간",
+      "renderQualityHigh": "높음",
+      "frameRate": "프레임 레이트",
+      "frameRateLow": "30fps",
+      "frameRateMedium": "45fps",
+      "frameRateHigh": "60fps"
     }
   },
   "subtitle": {
@@ -1284,8 +1297,11 @@
       "disabledError": "에이전트 모드 비활성화됨(부분 정리 실패)",
       "enableFailed": "활성화 실패",
       "disconnected": "서버 연결이 끊어졌습니다.",
-      "agentDisconnected": "에이전트 서버 연결이 끊어졌습니다."
+      "agentDisconnected": "에이전트 서버 연결이 끊어졌습니다.",
+      "freeModelWarning": "할당량 제한으로 인해 무료 모델은 Agent 모드에서 차단되기 쉽습니다. 유료 모델로 전환하는 것을 권장합니다.\n\n이미 유료 API를 설정한 경우 NEKO를 재시작해 보세요.",
+      "freeModelWarningTitle": "무료 모델 안내"
     },
+    "quotaExceeded": "무료 Agent 모델의 일일 체험 한도({{limit}}회)에 도달했습니다. 내일 다시 시도해 주세요.",
     "taskHud": {
       "title": "에이전트 작업",
       "running": "실행 중",

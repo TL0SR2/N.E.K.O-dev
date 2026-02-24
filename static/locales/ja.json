@@ -573,6 +573,7 @@
     "siliconAssist": "SiliconFlow: コスパ良、Agentモード対応",
     "openaiAssist": "OpenAI: 記憶管理能力が高い",
     "geminiAssist": "Gemini: 知能・コスパ共に極めて優秀、中国国内版は非対応",
+    "kimiAssist": "Kimi: 中国国内利用可、ロングコンテキスト・ビジョン対応",
     "assistApiNote": "注: カスタム音声機能はAlibabaのみ対応です。GLMとStepFunは非推奨です。",
     "assistApiKeyQwen": "Assist APIキー - Alibaba",
     "assistApiKeyOpenai": "Assist APIキー - OpenAI",
@@ -580,6 +581,7 @@
     "assistApiKeyStep": "Assist APIキー - StepFun",
     "assistApiKeySilicon": "Assist APIキー - SiliconFlow",
     "assistApiKeyGemini": "Assist APIキー - Gemini",
+    "assistApiKeyKimi": "Assist APIキー - Kimi",
     "assistApiKeyHint": "（Assist APIが {{provider}} の場合のみ必要）",
     "assistApiKeyPlaceholder": "任意（空欄ならCore APIキーを使用）",
     "providerNames": {
@@ -605,7 +607,8 @@
       "glm": "GLM",
       "step": "StepFun",
       "silicon": "SiliconFlow（高コスパ、推奨）",
-      "gemini": "Gemini（Google、高知能、中国国内版非対応）"
+      "gemini": "Gemini（Google、高知能、中国国内版非対応）",
+      "kimi": "Kimi（Moonshot、中国国内利用可、ロングコンテキスト対応）"
     },
     "freeVersionNoApiKey": "無料版はAPIキー不要です",
     "pleaseEnterApiKey": "APIキーを入力してください",
@@ -958,7 +961,7 @@
   "voice": {
     "title": "ボイス登録",
     "alibabaApiRequired": "⚠️ この機能はCosyVoiceモデルが必要です。APIキー設定でAlibaba Assist APIまたはローカル音声サーバーを設定してください",
-    "selectFile": "ローカル音声ファイルを選択（15秒推奨、最大30秒、wav/mp3形式）",
+    "selectFile": "ローカル音声ファイルを選択（8秒推奨、最大20秒、wav/mp3形式）",
     "customPrefix": "カスタムプレフィックス（必須、ボイスの識別用）",
     "customPrefixNote": "最大10文字、数字と英字のみ",
     "prefixPlaceholder": "最大10文字、数字と英字のみ",
@@ -1245,11 +1248,11 @@
       "mergeMessages": "メッセージ結合",
       "proactiveChat": "自発的会話",
       "proactiveVision": "自発的視覚",
-      "proactiveVisionChat": "視覚チャット",
+      "proactiveVisionChat": "画面共有",
       "proactiveVisionChatTooltip": "自発的会話と自発的視覚の両方を有効にする必要があります",
-      "proactiveNewsChat": "ニュースチャット",
+      "proactiveNewsChat": "ニュースサイト",
       "proactiveNewsChatTooltip": "トレンド話題を使用してチャット",
-      "proactiveVideoChat": "動画チャット",
+      "proactiveVideoChat": "動画サイト",
       "proactiveVideoChatTooltip": "動画コンテンツを使用してチャット",
       "agentMaster": "Agentマスタースイッチ",
       "keyboardControl": "キーボード/マウス操作",
@@ -1265,7 +1268,17 @@
       "disabled": "{{name}}を無効にしました",
       "enableFailed": "{{name}}の有効化に失敗しました",
       "userPluginAdapting": "ユーザープラグイン（開発中）",
-      "moltbotAdapting": "moltbot（開発中）"
+      "moltbotAdapting": "moltbot（開発中）",
+      "chatSettings": "チャット設定",
+      "animationSettings": "アニメーション設定",
+      "renderQuality": "画質",
+      "renderQualityLow": "低",
+      "renderQualityMedium": "中",
+      "renderQualityHigh": "高",
+      "frameRate": "フレームレート",
+      "frameRateLow": "30fps",
+      "frameRateMedium": "45fps",
+      "frameRateHigh": "60fps"
     }
   },
   "subtitle": {
@@ -1284,8 +1297,11 @@
       "disabledError": "エージェントモード無効 (部分的なクリーンアップに失敗)",
       "enableFailed": "有効化に失敗",
       "disconnected": "サーバー接続が失われました",
-      "agentDisconnected": "エージェントサーバー接続が失われました"
+      "agentDisconnected": "エージェントサーバー接続が失われました",
+      "freeModelWarning": "クォータの制限により、無料モデルではAgentモードがブロックされやすくなります。有料モデルへの切り替えをお勧めします。\n\nすでに有料APIを設定済みの場合は、NEKOを再起動してみてください。",
+      "freeModelWarningTitle": "無料モデルのお知らせ"
     },
+    "quotaExceeded": "無料 Agent モデルの本日の試用上限（{{limit}}回）に達しました。明日もう一度お試しください。",
     "taskHud": {
       "title": "エージェントタスク",
       "running": "実行中",
