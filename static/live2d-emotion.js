@@ -407,8 +407,8 @@ Live2DManager.prototype._removeManualExpressionOverride = function() {
 
 // 播放表情（优先使用 EmotionMapping.expressions）
 Live2DManager.prototype.playExpression = async function(emotion, specifiedExpressionFile = null) {
-    if (!this.currentModel || !this.emotionMapping) {
-        console.warn('无法播放表情：模型或映射配置未加载');
+    if (!this.currentModel) {
+        console.warn('无法播放表情：模型未加载');
         return;
     }
 

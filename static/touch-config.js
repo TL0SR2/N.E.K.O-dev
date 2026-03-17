@@ -375,7 +375,7 @@ function showTouchSetConfigWindow(hitAreas, motions, expressions){
     const cleanupMultiselect = () => {
         document.removeEventListener('click', closeAllMultiselects);
     };
-    closeButton.onclick = function(){
+    floatingWindow.onClose = function(){
         if (autoSaveTimeout) {
             clearTimeout(autoSaveTimeout)
             autoSaveTimeout = null
@@ -383,6 +383,8 @@ function showTouchSetConfigWindow(hitAreas, motions, expressions){
         saveTouchSetToServer()
         cleanupMultiselect()
         console.log("[TouchSet] 配置窗口已关闭")
+    }
+    closeButton.onclick = function(){
         floatingWindow.close()
     }
     
@@ -428,7 +430,9 @@ function showTouchSetConfigWindow(hitAreas, motions, expressions){
             if (Array.isArray(motionGroup)) {
                 motionGroup.forEach(motion => {
                     if (motion.File) {
-                        motionOptionsSet.add(motion.File.split("motions/")[1].replace(".motion3","").replace(".json",""))
+                        const parts = motion.File.split("motions/")
+                        const raw = parts.length > 1 ? parts[parts.length - 1] : motion.File.split("/").pop() || motion.File
+                        motionOptionsSet.add(raw.replace(".motion3","").replace(".json",""))
                     }
                 })
             }
@@ -699,25 +703,28 @@ function createTouchConfigFloatingWindow(options = {}){
     overlay.appendChild(modal)
     document.body.appendChild(overlay)
     
-    overlay.onclick = function(e){
-        if (e.target === overlay) {
-            // 取消点击外部关闭窗口的功能
-            // document.body.removeChild(overlay)
-        }
-    }
-    
-    return {
+    const windowObj = {
+        onClose: null,
         getContentContainer: function(){
             return contentContainer
         },
         close: function(cleanup){
             if (typeof cleanup === 'function') cleanup();
+            if (typeof windowObj.onClose === 'function') windowObj.onClose();
             document.body.removeChild(overlay)
         },
         setTitle: function(text){
             titleElement.textContent = text
         }
     }
+
+    overlay.onclick = function(e){
+        if (e.target === overlay) {
+            windowObj.close()
+        }
+    }
+
+    return windowObj
 }
 
 
