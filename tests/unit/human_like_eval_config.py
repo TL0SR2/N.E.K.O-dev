@@ -75,10 +75,11 @@ HUMAN_LIKE_AI_NESS_PENALTY_ANCHORS = {
 HUMAN_LIKE_MAX_RAW_SCORE = sum(
     config["weight"] * 10 for config in HUMAN_LIKE_SCORE_DIMENSIONS.values()
 )
+HUMAN_LIKE_MAX_PASSABLE_AI_NESS_PENALTY = 9
 
 
 HUMAN_LIKE_VERDICT_RULE = (
-    "仅当 overall_score >= 75、naturalness >= 6、empathy >= 6，且整体没有明显严重的机器感时，verdict 才能给 YES。"
+    "仅当 overall_score >= 75、naturalness >= 6、empathy >= 6，且 ai_ness_penalty <= 9（即没有达到严重机器感区间）时，verdict 才能给 YES。"
 )
 
 

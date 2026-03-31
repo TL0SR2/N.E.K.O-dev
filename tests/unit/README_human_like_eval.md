@@ -217,7 +217,7 @@ overall_score = max(raw_score, 0) / 95 * 100
 - `overall_score >= 75`
 - `naturalness >= 6`
 - `empathy >= 6`
-- 且整体没有明显严重机器感
+- `ai_ness_penalty <= 9`
 
 满足以上条件时，场景应判为 `YES`。
 

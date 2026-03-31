@@ -233,29 +233,45 @@ def _build_model_comparison(results: List[Dict[str, Any]], run_summaries: List[D
             values = [e.get("scores", {}).get(key) for e in entries if isinstance(e.get("scores", {}).get(key), (int, float))]
             avg_dimensions[key] = round(mean(values), 2) if values else None
 
-        passed = sum(1 for e in entries if e.get("passed"))
-        total = len(entries)
         summary = summary_map.get(model_tag, {"scenarios": {}})
         scenario_statuses = summary.get("scenarios", {})
+        total_expected = len(scenario_statuses) if scenario_statuses else len(SELECTED_SCENARIOS)
+        passed = sum(1 for status in scenario_statuses.values() if status == "passed")
+        explicit_failed = sum(1 for status in scenario_statuses.values() if status == "failed")
+        skipped = sum(1 for status in scenario_statuses.values() if status == "skipped")
         network_skipped = sum(1 for status in scenario_statuses.values() if status == "network_skipped")
         skipped_due_to_network = sum(1 for status in scenario_statuses.values() if status == "skipped_due_to_network")
+        incomplete = (network_skipped + skipped_due_to_network) > 0
+        completed_scenarios = passed + explicit_failed
+        failed_scenarios = explicit_failed + network_skipped + skipped_due_to_network
+        pass_rate_percent = round((passed / total_expected) * 100, 2) if total_expected else 0.0
 
         comparison.append(
             {
                 "model_tag": model_tag,
-                "scenario_count": total,
+                "scenario_count": len(entries),
+                "total_expected_scenarios": total_expected,
+                "completed_scenarios": completed_scenarios,
                 "passed_scenarios": passed,
-                "failed_scenarios": total - passed,
-                "pass_rate_percent": round((passed / total) * 100, 2) if total else 0.0,
+                "failed_scenarios": failed_scenarios,
+                "skipped_scenarios": skipped,
+                "pass_rate_percent": pass_rate_percent,
                 "avg_overall_score_100": round(mean(overall_scores), 2) if overall_scores else 0.0,
                 "avg_dimensions": avg_dimensions,
+                "incomplete": incomplete,
                 "network_skipped": network_skipped,
                 "skipped_due_to_network": skipped_due_to_network,
                 "scenario_statuses": scenario_statuses,
             }
         )
 
-    comparison.sort(key=lambda row: row["avg_overall_score_100"], reverse=True)
+    comparison.sort(
+        key=lambda row: (
+            row["incomplete"],
+            -row["avg_overall_score_100"],
+            -row["pass_rate_percent"],
+        )
+    )
     for idx, row in enumerate(comparison, 1):
         row["rank"] = idx
     return comparison
@@ -322,14 +338,14 @@ def _write_reports(payload: Dict[str, Any]) -> Path:
         [
             "## 多模型对比",
             "",
-            "| 排名 | 模型 | 平均总分(100分归一化) | 通过率 | 通过场景 | 未通过场景 | 网络跳过 | 后续连带跳过 |",
-            "|---|---|---:|---:|---:|---:|---:|---:|",
+            "| 排名 | 模型 | 是否未完成 | 平均总分(100分归一化) | 通过率 | 通过/预期场景 | 未通过场景 | 网络跳过 | 后续连带跳过 |",
+            "|---|---|---|---:|---:|---|---:|---:|---:|",
         ]
     )
     for row in payload["model_comparison"]:
         lines.append(
-            f"| {row['rank']} | {row['model_tag']} | {row['avg_overall_score_100']:.2f} | "
-            f"{row['pass_rate_percent']:.2f}% | {row['passed_scenarios']} | {row['failed_scenarios']} | "
+            f"| {row['rank']} | {row['model_tag']} | {'是' if row['incomplete'] else '否'} | {row['avg_overall_score_100']:.2f} | "
+            f"{row['pass_rate_percent']:.2f}% | {row['passed_scenarios']}/{row['total_expected_scenarios']} | {row['failed_scenarios']} | "
             f"{row['network_skipped']} | {row['skipped_due_to_network']} |"
         )
 

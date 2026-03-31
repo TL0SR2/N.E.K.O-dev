@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from tests.unit.human_like_eval_config import (
     HUMAN_LIKE_AI_NESS_PENALTY_ANCHORS,
     HUMAN_LIKE_MAX_RAW_SCORE,
+    HUMAN_LIKE_MAX_PASSABLE_AI_NESS_PENALTY,
     HUMAN_LIKE_SCORE_DIMENSIONS,
     HUMAN_LIKE_VERDICT_RULE,
     format_human_like_score_anchors,
@@ -153,6 +154,10 @@ overall_score = max(raw_score, 0) / {HUMAN_LIKE_MAX_RAW_SCORE} * 100
                 clean = clean.strip()
 
             data = json.loads(clean)
+            if not isinstance(data, dict):
+                raise TypeError(
+                    f"Expected judging JSON root to be an object, got {type(data).__name__}"
+                )
 
             scores = {
                 "naturalness": self._clamp_score(data.get("naturalness")),
@@ -167,11 +172,7 @@ overall_score = max(raw_score, 0) / {HUMAN_LIKE_MAX_RAW_SCORE} * 100
             raw_score = self._compute_raw_score(scores)
             computed_overall = self._normalize_overall_score(raw_score)
             raw_verdict = str(data.get("verdict", "NO")).upper().strip()
-            passed = (
-                computed_overall >= 75
-                and scores["naturalness"] >= 6
-                and scores["empathy"] >= 6
-            )
+            passed = self._meets_pass_rule(scores=scores, overall_score=computed_overall)
             verdict_str = "YES" if passed else "NO"
 
             result_entry["scores"] = {
@@ -244,3 +245,12 @@ overall_score = max(raw_score, 0) / {HUMAN_LIKE_MAX_RAW_SCORE} * 100
     def _normalize_overall_score(raw_score: float) -> float:
         normalized = max(raw_score, 0.0) / HUMAN_LIKE_MAX_RAW_SCORE * 100
         return round(max(0.0, min(100.0, normalized)), 2)
+
+    @staticmethod
+    def _meets_pass_rule(scores: Dict[str, int], overall_score: float) -> bool:
+        return (
+            overall_score >= 75
+            and scores["naturalness"] >= 6
+            and scores["empathy"] >= 6
+            and scores["ai_ness_penalty"] <= HUMAN_LIKE_MAX_PASSABLE_AI_NESS_PENALTY
+        )
