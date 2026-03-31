@@ -153,6 +153,7 @@ It has its own:
 - persona presets
 - batch runner
 - Chinese judging prompts
+- normalized 100-point overall score
 - report generation flow
 
 Documentation:

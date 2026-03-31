@@ -72,6 +72,10 @@ HUMAN_LIKE_AI_NESS_PENALTY_ANCHORS = {
     "13-15": "极强机器感，严重影响聊天体验和人格化表现。",
 }
 
+HUMAN_LIKE_MAX_RAW_SCORE = sum(
+    config["weight"] * 10 for config in HUMAN_LIKE_SCORE_DIMENSIONS.values()
+)
+
 
 HUMAN_LIKE_VERDICT_RULE = (
     "仅当 overall_score >= 75、naturalness >= 6、empathy >= 6，且整体没有明显严重的机器感时，verdict 才能给 YES。"

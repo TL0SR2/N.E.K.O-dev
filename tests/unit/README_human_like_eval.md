@@ -145,7 +145,7 @@ uv run python tests/unit/run_human_like_multi_model_eval.py
 当前评分维度如下：
 
 | 维度 | 含义 | 权重 |
-|---|---|---:|
+| --- | --- | ---: |
 | `naturalness` | 自然度 | 2.5 |
 | `empathy` | 共情力 | 2.0 |
 | `lifelikeness` | 生活感 | 1.5 |
@@ -157,7 +157,7 @@ uv run python tests/unit/run_human_like_multi_model_eval.py
 ## 单场景总分计算公式
 
 ```text
-overall_score =
+raw_score =
 naturalness * 2.5 +
 empathy * 2.0 +
 lifelikeness * 1.5 +
@@ -167,7 +167,24 @@ persona_warmth * 1.0 -
 ai_ness_penalty
 ```
 
-程序会将总分限制在 `0~100` 区间。
+其中原始加权满分不是 100，而是：
+
+```text
+max_raw_score = 95
+```
+
+为了避免误解，系统当前使用**归一化总分**：
+
+```text
+overall_score = max(raw_score, 0) / 95 * 100
+```
+
+也就是说：
+
+- `raw_score`：原始加权分
+- `overall_score`：按 95 分满分归一化后的 100 分制总分
+
+程序会将 `overall_score` 限制在 `0~100` 区间。
 
 ## 评分锚点
 
@@ -260,6 +277,9 @@ Markdown 报告中包含：
 - 多模型对比
 - 各维度均分
 - 每个场景的评分结果
+- 每个场景的原始加权分与归一化总分
+
+总测试说明中的 `tests/README.md` 也会保留该框架的简要入口说明；如果这里的机制发生变化，应同时更新两处文档。
 
 ## 当前系统的性质说明
 

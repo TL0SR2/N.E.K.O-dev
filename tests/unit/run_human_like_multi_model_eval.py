@@ -322,7 +322,7 @@ def _write_reports(payload: Dict[str, Any]) -> Path:
         [
             "## 多模型对比",
             "",
-            "| 排名 | 模型 | 平均总分 | 通过率 | 通过场景 | 未通过场景 | 网络跳过 | 后续连带跳过 |",
+            "| 排名 | 模型 | 平均总分(100分归一化) | 通过率 | 通过场景 | 未通过场景 | 网络跳过 | 后续连带跳过 |",
             "|---|---|---:|---:|---:|---:|---:|---:|",
         ]
     )
@@ -358,7 +358,8 @@ def _write_reports(payload: Dict[str, Any]) -> Path:
                 f"### {result['test_name']}",
                 f"- 场景：{result.get('scenario_title')} ({result.get('scenario_id')})",
                 f"- 结论：{result.get('verdict')}",
-                f"- 总分：{score}",
+                f"- 总分（100分归一化）：{score}",
+                f"- 原始加权分：{result.get('scores', {}).get('raw_score')}",
                 f"- 分析：{result.get('analysis', '')}",
                 f"- 优点：{'；'.join(result.get('strengths', [])) or '-'}",
                 f"- 不足：{'；'.join(result.get('weaknesses', [])) or '-'}",

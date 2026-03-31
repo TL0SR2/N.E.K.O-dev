@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from tests.unit.human_like_eval_config import (
     HUMAN_LIKE_AI_NESS_PENALTY_ANCHORS,
+    HUMAN_LIKE_MAX_RAW_SCORE,
     HUMAN_LIKE_SCORE_DIMENSIONS,
     HUMAN_LIKE_VERDICT_RULE,
     format_human_like_score_anchors,
@@ -94,8 +95,8 @@ JSON 字段名保持英文，不要改名。
 请严格参考以下评分锚点，不要随意打分。优先根据锚点判断应落在哪个区间，再在区间内选择最合适的整数分值：
 {anchor_text}
 
-总分计算公式：
-overall_score =
+原始加权分计算公式：
+raw_score =
 naturalness * 2.5 +
 empathy * 2.0 +
 lifelikeness * 1.5 +
@@ -103,6 +104,11 @@ context_retention * 1.5 +
 engagement * 1.0 +
 persona_warmth * 1.0 -
 ai_ness_penalty
+
+归一化总分计算公式：
+overall_score = max(raw_score, 0) / {HUMAN_LIKE_MAX_RAW_SCORE} * 100
+
+也就是说，`overall_score` 必须是按满分 {HUMAN_LIKE_MAX_RAW_SCORE} 归一化到 100 分后的结果，而不是直接返回原始加权分。
 
 评分原则：
 - 请严格评分，不要因为“看起来在安慰人”就轻易给高分。
@@ -156,13 +162,16 @@ ai_ness_penalty
                 "ai_ness_penalty": self._clamp_penalty(data.get("ai_ness_penalty")),
             }
 
-            computed_overall = self._compute_overall_score(scores)
+            raw_score = self._compute_raw_score(scores)
+            computed_overall = self._normalize_overall_score(raw_score)
             verdict_str = str(data.get("verdict", "NO")).upper().strip()
             passed = verdict_str.startswith("YES")
 
             result_entry["scores"] = {
                 **scores,
+                "raw_score": raw_score,
                 "overall_score": computed_overall,
+                "normalization_basis": HUMAN_LIKE_MAX_RAW_SCORE,
                 "weights": HUMAN_LIKE_SCORE_DIMENSIONS,
                 "ai_ness_penalty_anchors": HUMAN_LIKE_AI_NESS_PENALTY_ANCHORS,
             }
@@ -211,14 +220,19 @@ ai_ness_penalty
         return [str(item).strip() for item in value if str(item).strip()]
 
     @staticmethod
-    def _compute_overall_score(scores: Dict[str, int]) -> float:
-        total = (
+    def _compute_raw_score(scores: Dict[str, int]) -> float:
+        return round(
             scores["naturalness"] * 2.5
             + scores["empathy"] * 2.0
             + scores["lifelikeness"] * 1.5
             + scores["context_retention"] * 1.5
             + scores["engagement"] * 1.0
             + scores["persona_warmth"] * 1.0
-            - scores["ai_ness_penalty"]
+            - scores["ai_ness_penalty"],
+            2,
         )
-        return round(max(0.0, min(100.0, total)), 2)
+
+    @staticmethod
+    def _normalize_overall_score(raw_score: float) -> float:
+        normalized = max(raw_score, 0.0) / HUMAN_LIKE_MAX_RAW_SCORE * 100
+        return round(max(0.0, min(100.0, normalized)), 2)
