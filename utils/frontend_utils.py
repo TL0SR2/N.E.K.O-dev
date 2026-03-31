@@ -21,9 +21,6 @@ from datetime import datetime
 from pathlib import Path
 import httpx
 
-from utils.workshop_utils import load_workshop_config
-
-
 
 chinese_char_pattern = re.compile(r'[\u4e00-\u9fff]+')
 bracket_patterns = [re.compile(r'\(.*?\)'),
@@ -179,7 +176,8 @@ def calculate_text_similarity(text1: str, text2: str) -> float:
 
 def find_models():
     """
-    递归扫描 'static' 文件夹、用户文档下的 'live2d' 文件夹和用户mod路径，查找所有包含 '.model3.json' 文件的子目录。
+    递归扫描 'static' 文件夹、用户文档下的 'live2d' 文件夹、Steam创意工坊目录和用户mod路径，
+    查找所有包含 '.model3.json' 文件的子目录。
     """
     from utils.config_manager import get_config_manager
     
@@ -194,15 +192,32 @@ def find_models():
         logging.warning(f"警告：static文件夹路径不存在: {static_dir}")
     
     # 添加用户文档目录下的live2d文件夹
+    # CFA (反勒索防护) 感知：如果原始 Documents 不可写但可读，
+    # 从原始路径读取模型（/user_live2d），可写回退路径作为辅助（/user_live2d_local）
     try:
         config_mgr = get_config_manager()
         config_mgr.ensure_live2d_directory()
         docs_live2d_dir = str(config_mgr.live2d_dir)
-        if os.path.exists(docs_live2d_dir):
-            search_dirs.append(('documents', docs_live2d_dir, '/user_live2d'))
+        readable_live2d = config_mgr.readable_live2d_dir
+
+        if readable_live2d:
+            # CFA 场景：原始 Documents 可读，回退路径可写
+            readable_str = str(readable_live2d)
+            if os.path.exists(readable_str):
+                search_dirs.append(('documents', readable_str, '/user_live2d'))
+            if os.path.exists(docs_live2d_dir) and docs_live2d_dir != readable_str:
+                search_dirs.append(('documents_local', docs_live2d_dir, '/user_live2d_local'))
+        else:
+            # 正常场景
+            if os.path.exists(docs_live2d_dir):
+                search_dirs.append(('documents', docs_live2d_dir, '/user_live2d'))
     except Exception as e:
         logging.warning(f"无法访问用户文档live2d目录: {e}")
     
+    # 添加Steam创意工坊目录
+    workshop_search_dir = _resolve_workshop_search_dir()
+    if workshop_search_dir and os.path.exists(workshop_search_dir):
+        search_dirs.append(('workshop', workshop_search_dir, '/workshop'))
     
     # 遍历所有搜索目录
     for source, search_root_dir, url_prefix in search_dirs:
@@ -237,12 +252,19 @@ def find_models():
                             # 同时更新display_name以区分
                             display_name = f"{display_name} ({source})"
                         
-                        found_models.append({
+                        model_entry = {
                             "name": final_name,
                             "display_name": display_name,
                             "path": f"{url_prefix}/{model_path}",
                             "source": source
-                        })
+                        }
+                        
+                        if source == 'workshop':
+                            path_parts = model_path.split('/')
+                            if path_parts and path_parts[0].isdigit():
+                                model_entry["item_id"] = path_parts[0]
+                        
+                        found_models.append(model_entry)
                         
                         # 优化：一旦在某个目录找到模型json，就无需再继续深入该目录的子目录
                         dirs[:] = []
@@ -341,6 +363,19 @@ def is_user_imported_model(model_path: str, config_manager=None) -> bool:
         return False
 
 
+def _resolve_workshop_search_dir() -> str:
+    """
+    获取创意工坊搜索目录
+    
+    优先级: user_mod_folder(配置) > Steam运行时路径 > user_workshop_folder(缓存文件) > default_workshop_folder(配置) > 默认workshop目录
+    """
+    from utils.config_manager import get_workshop_path
+    workshop_path = get_workshop_path()
+    if workshop_path and os.path.exists(workshop_path):
+        return workshop_path
+    return None
+
+
 def find_model_directory(model_name: str):
     """
     查找模型目录，优先在用户文档目录，其次在创意工坊目录，最后在static目录
@@ -359,25 +394,44 @@ def find_model_directory(model_name: str):
         logging.warning(f"模型名称包含非法路径字符: {model_name_safe}")
         return (None, None)
     
-    # 从配置文件获取WORKSHOP_PATH，如果不存在则使用steam_workshop_path
-    workshop_config_data = load_workshop_config()
-    WORKSHOP_SEARCH_DIR = workshop_config_data.get("WORKSHOP_PATH", workshop_config_data.get("steam_workshop_path", workshop_config_data.get("default_workshop_folder")))
+    WORKSHOP_SEARCH_DIR = _resolve_workshop_search_dir()
     
     # 定义允许的基础目录列表
     allowed_base_dirs = []
-    
-    # 首先尝试在用户文档目录
+
+    # 获取 CFA 场景下的可读 live2d 目录（可能为 None）
+    readable_live2d = None
     try:
         config_mgr = get_config_manager()
+        readable_live2d = config_mgr.readable_live2d_dir
+    except Exception:
+        pass
+
+    # 首先尝试可读的原始 Documents 目录（CFA 场景下优先，与 find_models 一致）
+    try:
+        if readable_live2d:
+            readable_model_dir = readable_live2d / model_name
+            if readable_model_dir.exists():
+                readable_model_dir_real = os.path.realpath(readable_model_dir)
+                readable_live2d_real = os.path.realpath(readable_live2d)
+                if os.path.commonpath([readable_model_dir_real, readable_live2d_real]) == readable_live2d_real:
+                    return (str(readable_model_dir), '/user_live2d')
+    except Exception as e:
+        logging.warning(f"检查原始文档目录模型时出错: {e}")
+
+    # 然后尝试可写回退路径（CFA 场景下为 AppData，正常场景为唯一路径）
+    try:
+        config_mgr = get_config_manager()
+        _live2d_url_prefix = '/user_live2d_local' if readable_live2d else '/user_live2d'
         docs_model_dir = config_mgr.live2d_dir / model_name
         if docs_model_dir.exists():
             docs_model_dir_real = os.path.realpath(docs_model_dir)
             docs_live2d_dir_real = os.path.realpath(config_mgr.live2d_dir)
             if os.path.commonpath([docs_model_dir_real, docs_live2d_dir_real]) == docs_live2d_dir_real:
-                return (str(docs_model_dir), '/user_live2d')
+                return (str(docs_model_dir), _live2d_url_prefix)
     except Exception as e:
         logging.warning(f"检查文档目录模型时出错: {e}")
-    
+
     # 然后尝试创意工坊目录
     try:
         if WORKSHOP_SEARCH_DIR and os.path.exists(WORKSHOP_SEARCH_DIR):
@@ -471,9 +525,7 @@ def find_workshop_item_by_id(item_id: str) -> tuple:
         (物品路径, URL前缀) 元组，即使找不到也会返回默认值
     """
     try:
-        # 从配置文件获取WORKSHOP_PATH，如果不存在则使用steam_workshop_path或默认路径
-        workshop_config = load_workshop_config()
-        workshop_dir = workshop_config.get("WORKSHOP_PATH", workshop_config.get("steam_workshop_path", workshop_config.get("default_workshop_folder", "static")))
+        workshop_dir = _resolve_workshop_search_dir()
         
         # 如果路径不存在或为空，使用默认的static目录
         if not workshop_dir or not os.path.exists(workshop_dir):

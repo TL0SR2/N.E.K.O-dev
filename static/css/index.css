@@ -16,7 +16,7 @@ body {
 }
 
 
-
+/* 右上角蓝色状态栏提示气泡框样式 */
 /* Status 气泡框样式 - 更显眼的样式 */
 #status-toast {
     position: fixed;
@@ -96,7 +96,7 @@ body {
     z-index: 1;
     /* 确保猫爪在遮罩层之上 */
 }
-
+/* 小猫爪爪弹跳动画 */
 @keyframes pawBounce {
 
     0%,
@@ -115,14 +115,14 @@ body {
         /* 保持垂直居中并添加动画 */
     }
 }
-
+/* 显示状态提示气泡框 */
 #status-toast.show {
     opacity: 1;
     transform: translateY(0) scale(1);
     pointer-events: auto;
     animation: slide-in-toast 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
-
+/* 状态提示气泡框滑动入动画 */
 @keyframes slide-in-toast {
     0% {
         opacity: 0;
@@ -134,13 +134,13 @@ body {
         transform: translateY(0) scale(1);
     }
 }
-
+/* 状态提示气泡框滑动出动画 */
 #status-toast.hide {
     opacity: 0;
     transform: translateY(-20px) scale(0.95);
     animation: none;
 }
-
+/* 移动端响应式设计 */
 @media (max-width: 600px) {
     #status-toast {
         top: 10px;
@@ -153,7 +153,7 @@ body {
         padding-left: 45px;
         /* 为左上角的猫爪留出空间 */
     }
-
+    /* 移动端猫爪图标位置调整 */
     #status-toast::before {
         top: 6px;
         left: 10px;
@@ -161,11 +161,11 @@ body {
         transform: translateY(0);
         /* 增大移动端猫爪图标 */
     }
-
+    /* 移动端状态提示气泡框滑动入动画 */
     #status-toast.show {
         transform: translateY(0) scale(1);
     }
-
+    /* 移动端状态提示气泡框滑动出动画 */
     #status-toast.hide {
         transform: translateY(-20px) scale(0.95);
     }
@@ -210,7 +210,7 @@ button * {
         height: 100%;
     }
 }
-
+/* 看板娘判定框-容器 */
 #live2d-container {
     position: fixed;
     right: 0px;
@@ -224,20 +224,23 @@ button * {
     overflow: hidden;
     visibility: visible;
     transition: all 1s ease-in-out, height 0ms 1s, width 0ms 1s, visibility 0ms 1s;
+    /* GPU 合成层隔离：减少窗口级重绘对 canvas 的影响 */
+    will-change: transform;
+    transform: translateZ(0);
 }
-
+/* 看板娘判定框-最小化状态 */
 #live2d-container.minimized {
-    right: -800px;
-    /* 向右侧移出屏幕 */
+    transform: translateX(300px) translateZ(0);
+    /* 向右平滑滑出（配合 opacity 渐隐） */
     opacity: 0;
     visibility: hidden;
 }
-
+/* 看板娘判定框-悬停时半透明 */
 #live2d-container.locked-hover-fade,
 #vrm-container.locked-hover-fade {
     opacity: 0.12;
 }
-
+/* 看板娘画布样式 */
 #live2d-canvas {
     right: 0;
     bottom: 0;
@@ -248,13 +251,16 @@ button * {
     opacity: 1;
     visibility: visible;
     background: transparent;
+    /* GPU 合成层隔离 */
+    will-change: transform;
+    transform: translateZ(0);
 }
-
+/* 看板娘判定框-最小化状态时画布透明 */
 #live2d-canvas.minimized {
     opacity: 0;
     visibility: hidden;
 }
-
+/* 看板娘VR模型判定框-容器 */
 #vrm-container {
     position: fixed;
     right: 0px;
@@ -268,14 +274,17 @@ button * {
     overflow: hidden;
     visibility: visible;
     transition: all 1s ease-in-out;
+    /* GPU 合成层隔离：减少窗口级重绘对 canvas 的影响 */
+    will-change: transform;
+    transform: translateZ(0);
 }
-
+/* 看板娘VR模型判定框-最小化状态 */
 #vrm-container.minimized {
-    right: -800px;
+    transform: translateX(300px) translateZ(0);
     opacity: 0;
     visibility: hidden;
 }
-
+/* 看板娘VR模型画布样式 */
 #vrm-canvas {
     right: 0;
     bottom: 0;
@@ -286,28 +295,27 @@ button * {
     background: transparent;
     width: 100%;
     height: 100%;
+    /* GPU 合成层隔离 */
+    will-change: transform;
+    transform: translateZ(0);
 }
-
+/* 看板娘VR模型判定框-最小化状态时画布透明 */
 #vrm-canvas.minimized {
     opacity: 0;
     visibility: hidden;
 }
-
+/* 看板娘聊天框-容器 */
 #chat-container {
-    margin-bottom: 50px;
     pointer-events: auto;
     /* 恢复鼠标交互 */
     position: fixed;
     left: 20px;
-    bottom: 20px;
+    bottom: 70px;
     width: 400px;
     max-height: 500px;
     height: 500px;
-    /* Fluent Design Acrylic 材质 */
-    background: rgba(255, 255, 255, 0.65);
-    backdrop-filter: saturate(180%) blur(20px);
-    /* Fluent Design 标准模糊值 */
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    /* 背景设为透明，backdrop-filter 移至 ::before 伪元素以避免合成器泄漏 */
+    background: transparent;
     border-radius: 8px;
     /* Fluent Design 标准圆角 */
     border: 1px solid rgba(255, 255, 255, 0.18);
@@ -324,7 +332,32 @@ button * {
     scroll-behavior: smooth;
     display: flex;
     flex-direction: column;
-    transition: width 0.3s ease, height 0.3s ease, max-height 0.3s ease, padding 0.3s ease, box-shadow 0.2s ease;
+    transform-origin: left bottom;
+    transform: scale(1);
+    transition: width 0.3s ease, height 0.3s ease, max-height 0.3s ease, padding 0.3s ease, box-shadow 0.2s ease, transform 0.32s ease;
+}
+
+#chat-container.collapsing {
+    transform: scale(var(--chat-collapse-scale-x, 1), var(--chat-collapse-scale-y, 1));
+    transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: transform;
+}
+
+/* Fluent Design Acrylic 材质层：将 backdrop-filter 隔离到伪元素上，
+   避免它与滚动子元素同层合成导致 Chromium 透明区域泄漏 */
+#chat-container::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(255, 255, 255, 0.65);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-radius: inherit;
+    z-index: -1;
+    pointer-events: none;
 }
 
 /* 内部内容包裹器，负责滚动 - Fluent Design */
@@ -333,6 +366,7 @@ button * {
     flex-grow: 1;
     padding: 16px;
     padding-top: 48px;
+    overflow-x: hidden;
     overflow-y: auto;
     scroll-behavior: smooth;
     transition: opacity 0.2s ease, visibility 0.2s ease;
@@ -340,6 +374,36 @@ button * {
     visibility: visible;
     background: rgba(249, 249, 249, 0.7);
     /* Fluent Design 背景层 */
+    /* Firefox 滚动条 */
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 0, 0, 0.15) rgba(249, 249, 249, 0.95);
+}
+
+#chat-content-wrapper:hover {
+    scrollbar-color: rgba(0, 0, 0, 0.25) rgba(249, 249, 249, 0.95);
+}
+
+/* 聊天内容滚动条 - 防止透明窗口中滚动条轨道穿透桌面 */
+#chat-content-wrapper::-webkit-scrollbar {
+    width: 6px;
+}
+
+#chat-content-wrapper::-webkit-scrollbar-track {
+    background: rgba(249, 249, 249, 0.95);
+}
+
+#chat-content-wrapper::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 3px;
+}
+
+#chat-content-wrapper::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.25);
+}
+
+/* 滚动条角落 - 防止透明窗口中角落区域穿透桌面 */
+#chat-content-wrapper::-webkit-scrollbar-corner {
+    background: rgba(249, 249, 249, 0.95);
 }
 
 /* 切换按钮样式 - 更醒目的设计 */
@@ -350,6 +414,7 @@ button * {
     /* 绝对定位于容器内 */
     top: 8px;
     right: 8px;
+    left: auto;
     width: 32px;
     /* 按钮尺寸匹配图标 */
     height: 32px;
@@ -395,8 +460,8 @@ button * {
     left: 0;
     right: 0;
     height: 48px;
-    background: rgba(255, 255, 255, 0.5);
-    /* 更透明的 Mica 效果 */
+    background: #f7f8fa;
+    /* 不透明的标题栏背景 */
     border-bottom: 1px solid rgba(0, 0, 0, 0.06);
     /* Fluent Design 中性分隔线 */
     display: flex;
@@ -431,6 +496,89 @@ button * {
     -ms-user-select: none;
 }
 
+#chat-content-actions {
+    position: sticky;
+    top: 12px;
+    z-index: 24;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin: 0 0 12px;
+    pointer-events: none;
+}
+
+.chat-header-action-btn {
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: min(34vw, 190px);
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid rgba(68, 183, 254, 0.32);
+    border-radius: 999px;
+    background: rgba(68, 183, 254, 0.08);
+    color: #2497d9;
+    cursor: pointer;
+    box-sizing: border-box;
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.2s ease, opacity 0.2s ease;
+}
+
+.chat-header-action-btn[hidden] {
+    display: none !important;
+}
+
+.chat-header-action-btn:hover:not(:disabled) {
+    background: rgba(68, 183, 254, 0.14);
+    border-color: rgba(68, 183, 254, 0.5);
+    color: #127dbc;
+    transform: translateY(-1px);
+}
+
+.chat-header-action-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+}
+
+.chat-header-action-btn:focus-visible {
+    outline: 2px solid rgba(68, 183, 254, 0.48);
+    outline-offset: 2px;
+}
+
+.chat-header-action-btn-avatar.is-loading {
+    cursor: progress;
+    opacity: 0.82;
+}
+
+.chat-header-action-btn-avatar.is-active {
+    background: rgba(68, 183, 254, 0.18);
+    border-color: rgba(68, 183, 254, 0.45);
+    color: #127dbc;
+}
+
+.chat-header-action-icon {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.chat-header-btn-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.78rem;
+    font-weight: 600;
+    line-height: 1;
+}
 /* 对话区提示框 */
 #chat-tooltip {
     position: absolute;
@@ -449,14 +597,14 @@ button * {
     animation: slideInBounce 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55);
     transition: opacity 0.3s ease, transform 0.3s ease, visibility 0s linear 0.3s;
 }
-
+/* 聊天框提示框-隐藏状态 */
 #chat-tooltip.hidden {
     opacity: 0;
     transform: translateX(-20px);
     visibility: hidden;
     pointer-events: none;
 }
-
+/* 聊天框-提示框-三角形指示器 */
 #chat-tooltip::after {
     content: '';
     position: absolute;
@@ -468,7 +616,7 @@ button * {
     border-right: 8px solid transparent;
     border-bottom: 8px solid rgba(68, 183, 254, 0.95);
 }
-
+/* 聊天框-提示框-动画 */
 @keyframes slideInBounce {
     0% {
         opacity: 0;
@@ -486,7 +634,7 @@ button * {
     }
 }
 
-/* 聊天消息样式 */
+/* 聊天消息样式  */
 #chatContainer {
     display: flex;
     flex-direction: column;
@@ -522,7 +670,7 @@ button * {
     white-space: pre-wrap;
     /* 保留换行，配合 textContent 使用避免 XSS 风险 */
 }
-
+/* 聊天消息-动画-淡入 */
 @keyframes fadeIn {
     from {
         opacity: 0;
@@ -569,6 +717,154 @@ button * {
     display: none;
 }
 
+#chat-avatar-preview-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 12px;
+    border-radius: 16px;
+    border: 1px solid rgba(68, 183, 254, 0.18);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(247, 250, 252, 0.92));
+    box-shadow:
+        0 8px 22px rgba(33, 95, 144, 0.08),
+        inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+#chat-avatar-preview-card[hidden] {
+    display: none !important;
+}
+
+.chat-avatar-preview-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.chat-avatar-preview-card-title-group {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.chat-avatar-preview-card-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: #215f90;
+    line-height: 1.2;
+}
+
+.chat-avatar-preview-card-status {
+    font-size: 0.76rem;
+    line-height: 1.45;
+    color: rgba(38, 75, 102, 0.78);
+}
+
+.chat-avatar-preview-card-close {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    border: 1px solid rgba(68, 183, 254, 0.2);
+    background: rgba(68, 183, 254, 0.08);
+    color: #2497d9;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.chat-avatar-preview-card-close:hover {
+    background: rgba(68, 183, 254, 0.14);
+    border-color: rgba(68, 183, 254, 0.34);
+    color: #127dbc;
+}
+
+.chat-avatar-preview-card-body {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.chat-avatar-preview-image-shell {
+    position: relative;
+    width: 88px;
+    height: 88px;
+    border-radius: 24px;
+    overflow: hidden;
+    flex: 0 0 auto;
+    border: 1px solid rgba(68, 183, 254, 0.14);
+    background:
+        radial-gradient(circle at 30% 28%, rgba(255, 255, 255, 0.92), rgba(212, 237, 252, 0.86) 55%, rgba(180, 223, 248, 0.92));
+    box-shadow:
+        0 10px 24px rgba(33, 95, 144, 0.14),
+        inset 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+
+.chat-avatar-preview-image-shell.is-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.chat-avatar-preview-image {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+}
+
+.chat-avatar-preview-placeholder {
+    font-size: 0.78rem;
+    letter-spacing: 0.12em;
+    font-weight: 700;
+    color: rgba(33, 95, 144, 0.66);
+}
+
+.chat-avatar-preview-card-meta {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.chat-avatar-preview-card-note {
+    font-size: 0.78rem;
+    line-height: 1.55;
+    color: rgba(36, 62, 84, 0.82);
+}
+
+.chat-avatar-preview-refresh-btn {
+    pointer-events: auto;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(68, 183, 254, 0.24);
+    background: rgba(68, 183, 254, 0.08);
+    color: #2497d9;
+    cursor: pointer;
+    font-size: 0.76rem;
+    font-weight: 600;
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, opacity 0.2s ease;
+}
+
+.chat-avatar-preview-refresh-btn:hover:not(:disabled) {
+    background: rgba(68, 183, 254, 0.14);
+    border-color: rgba(68, 183, 254, 0.38);
+    color: #127dbc;
+}
+
+.chat-avatar-preview-refresh-btn:disabled {
+    opacity: 0.55;
+    cursor: progress;
+}
+
 /* 字幕提示框样式（放在输入框区域中，与输入框对齐） */
 .subtitle-prompt-message {
     width: 100%;
@@ -579,6 +875,8 @@ button * {
     margin-top: 8px;
     box-shadow: 0 2px 8px rgba(68, 183, 254, 0.1);
     box-sizing: border-box;
+    pointer-events: auto;
+    touch-action: manipulation;
 }
 
 .subtitle-prompt-content {
@@ -661,40 +959,99 @@ button * {
     left: 50%;
     transform: translateX(-50%);
     z-index: 99998;
-    max-width: 85%;
-    min-width: 320px;
-    padding: 20px 28px;
+    max-width: min(500px, 85%);
+    min-width: 200px;
+    padding: 10px 18px;
     background: linear-gradient(135deg, rgba(68, 183, 254, 0.95) 0%, rgba(68, 183, 254, 0.9) 50%, rgba(100, 200, 255, 0.95) 100%);
     color: #fff;
-    border-radius: 20px;
-    font-size: 19px;
+    border-radius: 12px;
+    font-size: 17px;
     font-weight: 500;
-    line-height: 1.7;
+    line-height: 1.5;
     text-align: center;
     overflow-wrap: break-word;
-    white-space: pre-wrap;
+    white-space: normal;
     opacity: 0;
     visibility: hidden;
     transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
     pointer-events: none;
-    /* 简化为2层shadow以提升性能 */
-    box-shadow: 0 8px 32px rgba(68, 183, 254, 0.4),
+    box-shadow: 0 6px 24px rgba(68, 183, 254, 0.35),
         0 0 0 1px rgba(255, 255, 255, 0.3) inset;
-    border: 2px solid rgba(255, 255, 255, 0.4);
-    /* 简化为单层text-shadow */
-    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+    border: 1.5px solid rgba(255, 255, 255, 0.4);
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+
+#subtitle-text {
+    display: block;
+    margin-right: 24px;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
 }
 
 #subtitle-display.hidden {
     display: none;
 }
 
+/* 拖拽句柄（四散箭头） */
+#subtitle-drag-handle {
+    position: absolute;
+    top: 50%;
+    right: 4px;
+    transform: translateY(-50%);
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: grab;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+    pointer-events: auto;
+    background: rgba(255, 255, 255, 0.18);
+    backdrop-filter: blur(4px);
+}
+
+#subtitle-drag-handle:hover {
+    background: rgba(255, 255, 255, 0.32);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.6);
+}
+
+#subtitle-drag-handle:active {
+    cursor: grabbing;
+    background: rgba(255, 255, 255, 0.42);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9);
+}
+
+/* SVG 四向箭头图标 */
+#subtitle-drag-arrows {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#subtitle-drag-arrows svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* 拖拽时的高亮效果 */
+#subtitle-display.dragging {
+    opacity: 0.85;
+    box-shadow: 0 12px 40px rgba(68, 183, 254, 0.6),
+        0 0 0 2px rgba(255, 255, 255, 0.5) inset;
+    transition: none !important;
+    user-select: none;
+}
+
 #subtitle-display.show {
     opacity: 1;
     visibility: visible;
-    transform: translateX(-50%) translateY(0);
     animation: subtitleFadeIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
+
+/* 确保拖拽句柄在任何情况下都显示（防御性规则） */
 
 @keyframes subtitleFadeIn {
     0% {
@@ -712,11 +1069,10 @@ button * {
 @media only screen and (max-width: 768px) {
     #subtitle-display {
         bottom: 80px;
-        /* 避免与输入框重叠 */
-        min-width: 280px;
-        max-width: 90%;
-        font-size: 17px;
-        padding: 16px 20px;
+        min-width: 180px;
+        max-width: 92%;
+        font-size: 15px;
+        padding: 6px 14px;
     }
 }
 
@@ -1046,20 +1402,24 @@ button * {
 }
 
 /* --- 最小化状态 --- */
+#chat-container.minimized::before {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: transparent;
+}
+
 #chat-container.minimized {
     background: rgba(68, 183, 254, 0.15);
     opacity: 1;
-    width: 50px;
-    /* 最小化宽度（正方形） */
-    height: 50px;
-    /* 最小化高度（正方形） */
-    max-height: 50px;
+    width: 50px !important;
+    height: 50px !important;
+    max-height: 50px !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
     padding: 0;
-    /* 移除内边距 */
     cursor: pointer;
-    /* 让整个小方块可点击（虽然按钮也在） */
     border-radius: 50%;
-    /* 圆形 */
+    transition: none;
     animation: breathingGlow 2s ease-in-out infinite;
 }
 
@@ -1082,15 +1442,16 @@ button * {
     display: none;
 }
 
-#chat-container.minimized #chat-tooltip {
-    display: none;
+#chat-container.minimized #chat-tooltip,
+#chat-container.minimized .music-player-bar {
+    display: none !important;
 }
 
 #chat-container.minimized #toggle-chat-btn {
     /* 将按钮充满整个容器 */
     top: 0;
-    left: 0;
     right: 0;
+    left: auto;
     bottom: 0;
     width: 100%;
     height: 100%;
@@ -1179,11 +1540,10 @@ button * {
     #chat-container {
         width: 90vw;
         left: 5vw;
-        bottom: 5px;
+        bottom: 10px;
         max-height: 60vh;
         height: 60vh;
         padding: 0;
-        margin-bottom: 5px;
         /* 禁用容器尺寸过渡，避免影响输入区 */
         transition: none !important;
         background: transparent;
@@ -1251,6 +1611,17 @@ button * {
         height: 60px;
     }
 
+    .chat-avatar-preview-card-body {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .chat-avatar-preview-image-shell {
+        width: 78px;
+        height: 78px;
+        border-radius: 22px;
+    }
+
     #screenshots-title {
         font-size: 0.8rem;
     }
@@ -1281,13 +1652,32 @@ button * {
 
 @media only screen and (max-width: 768px) {
 
-    /* 移动端：折叠（mobile-collapsed）时，聊天框高度为12vh */
+    /* 移动端：折叠时容器完全透明且不拦截触摸事件 */
     #chat-container.mobile-collapsed {
-        height: 12vh;
+        width: 48px !important;
+        min-width: 48px !important;
+        max-width: 48px !important;
+        height: 48px;
+        min-height: 48px;
+        max-height: 48px;
+        overflow: hidden;
+        pointer-events: none !important;
+        background: transparent !important;
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+        box-shadow: none !important;
+        border: none !important;
     }
 
-    /* 移动端：折叠（mobile-collapsed）时，切换按钮固定到左上角 */
+    #chat-container.mobile-collapsed::before {
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+        background: transparent !important;
+    }
+
+    /* 移动端：折叠时仅切换按钮可交互 */
     #chat-container.mobile-collapsed #toggle-chat-btn {
+        pointer-events: auto !important;
         left: 8px;
         right: auto;
         top: 8px;
@@ -1295,9 +1685,10 @@ button * {
         position: relative;
     }
 
-    /* 避免按钮覆盖输入区顶边，给输入区微小顶距 */
-    #chat-container.mobile-collapsed #text-input-area {
-        margin-top: 6px;
+    /* 移动端：折叠时隐藏输入区和音乐调节条 */
+    #chat-container.mobile-collapsed #text-input-area,
+    #chat-container.mobile-collapsed .music-player-bar {
+        display: none !important;
     }
 }
 
@@ -1322,6 +1713,12 @@ button * {
         animation: none;
         /* 移动端不需要呼吸效果 */
         background: transparent;
+    }
+
+    #chat-container.minimized::before {
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+        background: transparent !important;
     }
 }
 

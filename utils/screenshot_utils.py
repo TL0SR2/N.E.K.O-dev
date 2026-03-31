@@ -3,15 +3,16 @@
 提供截图分析功能，包括前端浏览器发送的截图和屏幕分享数据流处理
 """
 import base64
-import logging
 from typing import Optional
+from utils.logger_config import get_module_logger
+from utils.token_tracker import set_call_type
 import asyncio
 from io import BytesIO
 from PIL import Image
 from openai import AsyncOpenAI
 from config import get_extra_body
 
-logger = logging.getLogger(__name__)
+logger = get_module_logger(__name__)
 
 # 安全限制：最大图片大小 (10MB，base64编码后约13.3MB)
 MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
@@ -45,6 +46,8 @@ def compress_screenshot(
         ratio = target_h / h
         img = img.resize((int(w * ratio), target_h), _LANCZOS)
     buf = BytesIO()
+    if img.mode == "RGBA":
+        img = img.convert("RGB")
     img.save(buf, format="JPEG", quality=quality, optimize=True)
     return buf.getvalue()
 
@@ -132,7 +135,7 @@ async def analyze_image_with_vision_model(
 
         client = AsyncOpenAI(
             api_key=vision_api_key,
-            base_url=vision_base_url if vision_base_url else None,
+            base_url=vision_base_url or None,
             max_retries=0,
         )
         
@@ -143,6 +146,7 @@ async def analyze_image_with_vision_model(
             system_content = "你是一个图像描述助手, 请简洁地描述图片中的主要内容、关键细节和你觉得有趣的地方。你的回答不能超过250字。"
             user_text = "请描述这张图片的内容。"
         
+        set_call_type("vision")
         response = await client.chat.completions.create(
             model=vision_model,
             messages = [
@@ -166,7 +170,7 @@ async def analyze_image_with_vision_model(
                     ]
                 }
             ],
-            max_tokens=max_tokens,
+            max_completion_tokens=max_tokens,
             extra_body=get_extra_body(vision_model) or None
         )
         

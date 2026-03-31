@@ -1,6 +1,32 @@
 // 允许的来源列表
 const ALLOWED_ORIGINS = [window.location.origin];
 
+function parseVoiceRegisterError(errorObj) {
+    const errorCode = errorObj?.code;
+    const errorMsg = errorObj?.message || errorObj?.error || errorObj || '';
+    let displayError = errorMsg;
+    let shouldFlash = false;
+
+    if (errorCode === 'PREFIX_INVALID') {
+        displayError = window.t ? window.t('voice.prefixShouldBeEnglishLetterAndNumber') : '前缀应为英文字母和数字';
+        shouldFlash = true;
+    } else if (errorCode === 'INVALID_API_KEY') {
+        displayError = window.t ? window.t('voice.invalidApiKeyProvided') : '提供的API密钥无效';
+        shouldFlash = true;
+    } else {
+        const lowerMsg = errorMsg.toLowerCase();
+        if (lowerMsg.includes('prefix should be') && lowerMsg.includes('english letter and number')) {
+            displayError = window.t ? window.t('voice.prefixShouldBeEnglishLetterAndNumber') : '前缀应为英文字母和数字';
+            shouldFlash = true;
+        } else if (lowerMsg.includes('invalid api-key provided')) {
+            displayError = window.t ? window.t('voice.invalidApiKeyProvided') : '提供的API密钥无效';
+            shouldFlash = true;
+        }
+    }
+
+    return { displayError, shouldFlash };
+}
+
 // 关闭页面函数
 function closeVoiceClonePage() {
     if (window.opener) {
@@ -206,13 +232,42 @@ if (window.i18n && window.i18n.isInitialized) {
     }
 })();
 
+// 服务商切换时更新提示横幅
+document.addEventListener('DOMContentLoaded', function initProviderSwitch() {
+    const providerSelect = document.getElementById('voiceProvider');
+    const noticeDiv = document.getElementById('provider-notice');
+    if (!providerSelect || !noticeDiv) return;
+
+    function updateNotice() {
+        const provider = providerSelect.value;
+        const span = noticeDiv.querySelector('span');
+        if (!span) return;
+
+        const keyMap = {
+            'minimax': 'voice.minimaxApiRequired',
+            'minimax_intl': 'voice.minimaxIntlApiRequired',
+        };
+        const i18nKey = keyMap[provider] || 'voice.alibabaApiRequired';
+        span.setAttribute('data-i18n', i18nKey);
+        if (window.t) {
+            span.textContent = window.t(i18nKey);
+        }
+        // 若 window.t 不可用，保留 HTML 中的原始文本，不覆盖
+    }
+
+    providerSelect.addEventListener('change', updateNotice);
+    updateNotice();
+});
+
 function setFormDisabled(disabled) {
     const audioFile = document.getElementById('audioFile');
     const refLanguage = document.getElementById('refLanguage');
     const prefix = document.getElementById('prefix');
+    const voiceProvider = document.getElementById('voiceProvider');
     if (audioFile) audioFile.disabled = disabled;
     if (refLanguage) refLanguage.disabled = disabled;
     if (prefix) prefix.disabled = disabled;
+    if (voiceProvider) voiceProvider.disabled = disabled;
     // 禁用所有按钮
     const buttons = document.querySelectorAll('button');
     if (buttons && buttons.length > 0) {
@@ -240,10 +295,12 @@ function registerVoice() {
     setFormDisabled(true);
     resultDiv.textContent = window.t ? window.t('voice.registering') : '正在注册声音，请稍后！';
     resultDiv.className = 'result';
+    const provider = (document.getElementById('voiceProvider') || {}).value || 'cosyvoice';
     const formData = new FormData();
     formData.append('file', fileInput.files[0]);
     formData.append('ref_language', refLanguage);
     formData.append('prefix', prefix);
+    formData.append('provider', provider);
     fetch('/api/characters/voice_clone', {
         method: 'POST',
         body: formData
@@ -252,14 +309,18 @@ function registerVoice() {
             const data = await res.json();
             if (!res.ok) {
                 // 从响应体中提取详细错误信息
-                const errorMsg = data.error || data.detail || `API returned ${res.status}`;
+                const errorMsg = (data.code && window.t) ? window.t('errors.' + data.code, data.details || {}) : (data.error || data.detail || `API returned ${res.status}`);
                 throw new Error(errorMsg);
             }
             return data;
         })
         .then(data => {
             if (data.voice_id) {
-                resultDiv.textContent = window.t ? window.t('voice.registerSuccess', { voiceId: data.voice_id }) : '注册成功！voice_id: ' + data.voice_id;
+                if (data.reused) {
+                    resultDiv.textContent = window.t ? window.t('voice.reusedExisting', { voiceId: data.voice_id }) : '已复用现有音色，跳过上传。voice_id: ' + data.voice_id;
+                } else {
+                    resultDiv.textContent = window.t ? window.t('voice.registerSuccess', { voiceId: data.voice_id }) : '注册成功！voice_id: ' + data.voice_id;
+                }
                 // 刷新音色列表
                 setTimeout(() => {
                     if (typeof loadVoices === 'function') {
@@ -321,16 +382,24 @@ function registerVoice() {
                     });
                 }
             } else {
-                const errorMsg = data.error || (window.t ? window.t('common.unknownError') : '未知错误');
-                resultDiv.textContent = window.t ? window.t('voice.registerFailed', { error: errorMsg }) : '注册失败：' + errorMsg;
+                const errorObj = data.error || (window.t ? window.t('common.unknownError') : '未知错误');
+                const { displayError, shouldFlash } = parseVoiceRegisterError(errorObj);
+                resultDiv.textContent = window.t ? window.t('voice.registerFailed', { error: displayError }) : '注册失败：' + displayError;
                 resultDiv.className = 'result error';
+                if (shouldFlash) {
+                    resultDiv.classList.add('error-flash');
+                }
             }
             setFormDisabled(false);
         })
         .catch(err => {
-            const errorMsg = err?.message || err?.toString() || (window.t ? window.t('common.unknownError') : '未知错误');
-            resultDiv.textContent = window.t ? window.t('voice.requestError', { error: errorMsg }) : '请求出错：' + errorMsg;
+            const errorObj = err?.message || err?.toString() || (window.t ? window.t('common.unknownError') : '未知错误');
+            const { displayError, shouldFlash } = parseVoiceRegisterError(errorObj);
+            resultDiv.textContent = window.t ? window.t('voice.requestError', { error: displayError }) : '请求出错：' + displayError;
             resultDiv.className = 'result error';
+            if (shouldFlash) {
+                resultDiv.classList.add('error-flash');
+            }
             setFormDisabled(false);
         });
 }
@@ -376,7 +445,8 @@ async function playPreview(voiceId, btn) {
                     // localStorage 可能满了，但我们仍然可以播放这一次生成的音频
                 }
             } else {
-                throw new Error(data.error || 'Failed to get preview');
+                const _errMsg = (data.code && window.t) ? window.t('errors.' + data.code, data.details || {}) : (data.error || 'Failed to get preview');
+                throw new Error(_errMsg);
             }
         }
 

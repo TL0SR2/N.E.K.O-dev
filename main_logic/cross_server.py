@@ -7,21 +7,22 @@
 """
 
 import ssl
+import uuid
 
 import asyncio
 import time
 import pickle
 import aiohttp
-import logging
 from config import MONITOR_SERVER_PORT, MEMORY_SERVER_PORT, COMMENTER_SERVER_PORT
 from datetime import datetime
 import json
 import re
 from utils.frontend_utils import replace_blank, is_only_punctuation
+from utils.logger_config import get_module_logger
 from main_logic.agent_event_bus import publish_analyze_request_reliably
 
 # Setup logger for this module
-logger = logging.getLogger(__name__)
+logger = get_module_logger(__name__, "Main")
 emoji_pattern = re.compile(r'[^\w\u4e00-\u9fff\s>][^\w\u4e00-\u9fff\s]{2,}[^\w\u4e00-\u9fff\s<]', flags=re.UNICODE)
 emoji_pattern2 = re.compile("["
         u"\U0001F600-\U0001F64F"  # emoticons
@@ -32,7 +33,7 @@ emoji_pattern2 = re.compile("["
 emotion_pattern = re.compile('<(.*?)>')
 
 
-async def _publish_analyze_request_with_fallback(lanlan_name: str, trigger: str, messages: list[dict]) -> bool:
+async def _publish_analyze_request_with_fallback(lanlan_name: str, trigger: str, messages: list[dict], *, conversation_id: str | None = None) -> bool:
     """Publish analyze request via EventBus with ack/retry."""
     try:
         sent = await publish_analyze_request_reliably(
@@ -41,6 +42,7 @@ async def _publish_analyze_request_with_fallback(lanlan_name: str, trigger: str,
             messages=messages,
             ack_timeout_s=0.5,
             retries=1,
+            conversation_id=conversation_id,
         )
         if sent:
             logger.debug(
@@ -106,10 +108,11 @@ def merge_unsynced_tail_assistants(chat_history, last_synced_index):
     if not parts:
         return 0
 
-    merged = {'role': 'assistant', 'content': [{'type': 'text', 'text': '\n'.join(parts)}]}
+    # 只保留最后一条主动搭话，丢弃之前的冗余内容，避免持久记忆膨胀
+    merged = {'role': 'assistant', 'content': [{'type': 'text', 'text': parts[-1]}]}
     removed = consecutive - 1
     chat_history[first_idx:] = [merged]
-    logger.info(f"[cleanup] 合并了 {consecutive} 条未同步的连续主动搭话消息")
+    logger.info(f"[cleanup] 精简了 {consecutive} 条未同步的连续主动搭话消息，仅保留最后一条")
     return removed
 
 
@@ -129,8 +132,13 @@ async def keep_reader(ws: aiohttp.ClientWebSocketResponse):
         pass
 
 
-def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_server_url=f"ws://127.0.0.1:{MONITOR_SERVER_PORT}", config=None):
-    """独立进程运行的同步连接器"""
+def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_server_url=f"ws://127.0.0.1:{MONITOR_SERVER_PORT}", config=None, status_callback=None):
+    """独立进程运行的同步连接器
+
+    Args:
+        status_callback: Optional callable(str) -> None, thread-safe, invoked
+            on the caller's event loop to push status/error messages to the frontend.
+    """
 
     # 创建一个新的事件循环
     loop = asyncio.new_event_loop()
@@ -267,30 +275,40 @@ def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_serv
                                 # 增量发送：只发 /cache 未覆盖的剩余消息，触发 LLM 结算
                                 remaining = chat_history[last_synced_index:]
                                 logger.info(f"[{lanlan_name}] 热重置：聊天历史 {len(chat_history)} 条，增量 {len(remaining)} 条")
-                                if remaining:
+                                # 确定调用端点：有增量走 /renew，无增量走 /settle（补全摘要+时间戳）
+                                _renew_endpoint = "renew" if remaining else "settle"
+                                _renew_payload = remaining if remaining else chat_history
+                                if _renew_payload:
                                     try:
                                         async with aiohttp.ClientSession() as session:
                                             async with session.post(
-                                                f"http://127.0.0.1:{MEMORY_SERVER_PORT}/renew/{lanlan_name}",
-                                                json={'input_history': json.dumps(remaining, indent=2, ensure_ascii=False)},
+                                                f"http://127.0.0.1:{MEMORY_SERVER_PORT}/{_renew_endpoint}/{lanlan_name}",
+                                                json={'input_history': json.dumps(_renew_payload, indent=2, ensure_ascii=False)},
                                                 timeout=aiohttp.ClientTimeout(total=30.0)
                                             ) as response:
                                                 result = await response.json()
                                                 if result.get('status') == 'error':
-                                                    logger.error(f"[{lanlan_name}] 热重置记忆处理失败: {result.get('message')}")
+                                                    err_detail = result.get('message', '未知错误')
+                                                    logger.error(f"[{lanlan_name}] 热重置记忆处理失败 ({_renew_endpoint}): {err_detail}")
+                                                    if status_callback:
+                                                        try:
+                                                            status_callback(f"⚠️ 热重置记忆失败: {err_detail}")
+                                                        except Exception:
+                                                            pass
                                                 else:
-                                                    logger.info(f"[{lanlan_name}] 热重置记忆已成功上传到 memory_server")
+                                                    logger.info(f"[{lanlan_name}] 热重置记忆已成功上传到 memory_server ({_renew_endpoint})")
                                     except RuntimeError as e:
                                         if "shutdown" in str(e).lower() or "closed" in str(e).lower():
-                                            logger.info(f"[{lanlan_name}] 进程正在关闭，renew请求已取消")
+                                            logger.info(f"[{lanlan_name}] 进程正在关闭，{_renew_endpoint}请求已取消")
                                         else:
-                                            logger.exception(f"[{lanlan_name}] 调用 /renew API 失败: {type(e).__name__}: {e}")
+                                            logger.exception(f"[{lanlan_name}] 调用 /{_renew_endpoint} API 失败: {type(e).__name__}: {e}")
                                     except Exception as e:
-                                        logger.exception(f"[{lanlan_name}] 调用 /renew API 失败: {type(e).__name__}: {e}")
+                                        logger.exception(f"[{lanlan_name}] 调用 /{_renew_endpoint} API 失败: {type(e).__name__}: {e}")
                                 chat_history.clear()
                                 last_synced_index = 0
 
-                            if message["data"] == 'turn end': # lanlan的消息结束了
+                            if message["data"] in ('turn end', 'turn end agent_callback'): # lanlan的消息结束了
+                                is_agent_callback_turn_end = (message["data"] == 'turn end agent_callback')
                                 current_turn = 'user'
                                 text_output_cache = normalize_text(text_output_cache)
                                 if len(text_output_cache) > 0:
@@ -302,8 +320,8 @@ def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_serv
                                     merge_unsynced_tail_assistants(chat_history, last_synced_index)
                                 if config['monitor'] and sync_ws:
                                     await sync_ws.send_json({'type': 'turn end'})
-                                # 非阻塞地向tool_server发送最近对话，供分析器识别潜在任务
-                                # 检查是否正在关闭
+                                # 非阻塞地向tool_server发送最近对话，供分析器识别潜在任务。
+                                # 仅 agent-callback 专用通道会显式跳过，避免任务结果回调引发二次分析。
                                 if not shutdown_event.is_set():
                                     try:
                                         # 构造最近的消息摘要
@@ -317,11 +335,19 @@ def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_serv
                                                 if txt == '':
                                                     continue
                                                 recent.append({'role': item.get('role'), 'content': txt})
-                                        if recent:
+                                        has_user = any(m.get('role') == 'user' for m in recent)
+                                        logger.info(
+                                            f"[{lanlan_name}] turn_end analyze check: "
+                                            f"history={len(chat_history)} recent={len(recent)} "
+                                            f"has_user={has_user} had_input={had_user_input_this_turn} "
+                                            f"agent_callback_turn={is_agent_callback_turn_end}"
+                                        )
+                                        if recent and not is_agent_callback_turn_end:
                                             sent = await _publish_analyze_request_with_fallback(
                                                 lanlan_name=lanlan_name,
                                                 trigger="turn_end",
                                                 messages=recent,
+                                                conversation_id=uuid.uuid4().hex,
                                             )
                                             if sent:
                                                 logger.debug(f"[{lanlan_name}] analyze_request dispatch success (turn_end), messages={len(recent)}")
@@ -390,11 +416,13 @@ def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_serv
                                                 if txt == '':
                                                     continue
                                                 recent.append({'role': item.get('role'), 'content': txt})
-                                        if recent:
+                                        has_user = any(m.get('role') == 'user' for m in recent)
+                                        if recent and has_user:
                                             sent = await _publish_analyze_request_with_fallback(
                                                 lanlan_name=lanlan_name,
                                                 trigger="session_end",
                                                 messages=recent,
+                                                conversation_id=uuid.uuid4().hex,
                                             )
                                             if sent:
                                                 logger.info(f"[{lanlan_name}] analyze_request dispatch success (session_end), messages={len(recent)}")
@@ -430,11 +458,22 @@ def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_serv
                                             ) as response:
                                                 result = await response.json()
                                                 if result.get('status') == 'error':
-                                                    logger.debug(f"[{lanlan_name}] session end 记忆结算失败: {result.get('message')}")
+                                                    err_detail = result.get('message', '未知错误')
+                                                    logger.warning(f"[{lanlan_name}] session end 记忆结算失败: {err_detail}")
+                                                    if status_callback:
+                                                        try:
+                                                            status_callback(f"⚠️ 记忆摘要失败: {err_detail}")
+                                                        except Exception:
+                                                            pass
                                                 else:
                                                     logger.info(f"[{lanlan_name}] session end 记忆结算完成，{len(remaining)} 条消息")
                                     except Exception as e:
-                                        logger.debug(f"[{lanlan_name}] session end 记忆结算失败: {e}")
+                                        logger.warning(f"[{lanlan_name}] session end 记忆结算失败: {e}")
+                                        if status_callback:
+                                            try:
+                                                status_callback(f"⚠️ 记忆结算异常: {type(e).__name__}")
+                                            except Exception:
+                                                pass
                                 chat_history.clear()
                                 last_synced_index = 0
                         except Exception as e:

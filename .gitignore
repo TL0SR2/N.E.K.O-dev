@@ -1,6 +1,7 @@
 # 忽略敏感配置
 core_config.txt
 test.py
+mcp_server/servers.json
 tests/api_keys.json
 tests/test_inputs/*.wav
 
@@ -22,6 +23,10 @@ debug_audio/*
 # 忽略 memory/store 下所有内容（含子目录和文件）
 memory/store/*
 !memory/store/.gitkeep
+
+# 忽略缓存目录（根目录及 utils 下）
+/cache/
+utils/cache/
 config/api.py
 config/*.json
 !config/api_providers.json
@@ -30,6 +35,7 @@ lanlan_frd.exe
 
 # 忽略临时文件
 *.tmp
+*.bak
 
 # 忽略 Python 缓存文件和字节码
 __pycache__/
@@ -39,6 +45,7 @@ __pycache__/
 .ipynb_checkpoints/
 .vscode/
 .idea/
+.cursor/
 .pytest_cache/
 .DS_Store
 .venv
@@ -51,6 +58,7 @@ playwright_browsers/
 .env.test.local
 .env.production.local
 .ruff_cache
+*.code-workspace
 .claude
 CLAUDE.md
 
@@ -58,6 +66,9 @@ CLAUDE.md
 /launcher/target/
 **/target/
 Cargo.lock
+
+# Ignore embedded Rust subprojects (not part of current PR)
+/rust/neko-message-plane/
 
 # Node/Front-end temp (if any)
 node_modules/
@@ -84,6 +95,7 @@ desktop.ini
 static/ziraitikuwa/*
 static/neko/*
 static/kemomimi/*
+static/yui/*
 打包说明.txt
 runtime_hook_inflect.py
 backup/
@@ -108,3 +120,20 @@ tests/reports/
 latest_report.json
 sendText.js
 data/browser_use_prompts/*.md
+data/browser_use_extensions/
+.coverage
+.VSCodeCounter
+
+# 插件服务器运行时生成的凭证文件
+plugin/.plugin_server_admin_code
+
+# 插件备忘提醒运行时数据库
+plugin/plugins/memo_reminder/store.db
+
+# Local nested plugin repos (keep them out of the parent repo index)
+plugin/neko-plugin-docs/
+plugin/rust/
+
+# 本地调试/测试用插件
+plugin/plugins/music_tester/
+plugin/plugins/web_radio/

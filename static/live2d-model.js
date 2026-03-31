@@ -17,6 +17,15 @@ Live2DManager.prototype.loadModel = async function(modelPath, options = {}) {
     
     // 设置加载锁
     this._isLoadingModel = true;
+    const loadToken = ++this._activeLoadToken;
+    this._modelLoadState = 'preparing';
+    this._isModelReadyForInteraction = false;
+
+    // 清除上一次加载遗留的画布揭示定时器
+    if (this._canvasRevealTimer) {
+        clearTimeout(this._canvasRevealTimer);
+        this._canvasRevealTimer = null;
+    }
 
     try {
         // 移除当前模型
@@ -138,7 +147,7 @@ Live2DManager.prototype.loadModel = async function(modelPath, options = {}) {
         this.currentModel = model;
 
         // 使用统一的模型配置方法
-        await this._configureLoadedModel(model, modelPath, options);
+        await this._configureLoadedModel(model, modelPath, options, loadToken);
 
         return model;
     } catch (error) {
@@ -153,7 +162,7 @@ Live2DManager.prototype.loadModel = async function(modelPath, options = {}) {
                 this.currentModel = model;
 
                 // 使用统一的模型配置方法
-                await this._configureLoadedModel(model, defaultModelPath, options);
+                await this._configureLoadedModel(model, defaultModelPath, options, loadToken);
 
                 console.log('成功回退到默认模型: mao_pro');
                 return model;
@@ -168,14 +177,219 @@ Live2DManager.prototype.loadModel = async function(modelPath, options = {}) {
     } finally {
         // 无论成功还是失败，都要释放加载锁
         this._isLoadingModel = false;
+        if (this._activeLoadToken === loadToken && this._modelLoadState !== 'ready') {
+            this._modelLoadState = 'idle';
+            this._isModelReadyForInteraction = false;
+        }
+        // 安全网：如果加载失败导致画布仍处于 CSS 隐藏状态，强制恢复可见性
+        try {
+            if (this.pixi_app && this.pixi_app.view && this.pixi_app.view.style.opacity === '0') {
+                this.pixi_app.view.style.transition = '';
+                this.pixi_app.view.style.opacity = '';
+            }
+        } catch (_) {}
     }
+};
+
+Live2DManager.prototype._isLoadTokenActive = function(loadToken) {
+    return this._activeLoadToken === loadToken;
+};
+
+Live2DManager.prototype._waitForModelVisualStability = function(model, loadToken, options = {}) {
+    const requiredStableFrames = options.requiredStableFrames || 6;
+    const maxFrames = options.maxFrames || 60;
+    const minDimension = options.minDimension || 2;
+    const deltaThreshold = options.deltaThreshold || 2;
+    const minElapsedMs = options.minElapsedMs || 350;
+
+    return new Promise((resolve) => {
+        let frameCount = 0;
+        let stableFrames = 0;
+        let prevW = null;
+        let prevH = null;
+        const startTs = performance.now();
+
+        const tick = () => {
+            if (!this._isLoadTokenActive(loadToken) || !model || model.destroyed || !model.parent) {
+                resolve(false);
+                return;
+            }
+
+            frameCount += 1;
+            let width = 0;
+            let height = 0;
+
+            try {
+                const bounds = model.getBounds();
+                width = Number(bounds.width) || 0;
+                height = Number(bounds.height) || 0;
+            } catch (_) {
+                width = 0;
+                height = 0;
+            }
+
+            const hasValidSize = Number.isFinite(width) && Number.isFinite(height) && width > minDimension && height > minDimension;
+            const sizeStable = hasValidSize &&
+                prevW !== null &&
+                prevH !== null &&
+                Math.abs(width - prevW) <= deltaThreshold &&
+                Math.abs(height - prevH) <= deltaThreshold;
+
+            if (sizeStable) {
+                stableFrames += 1;
+            } else {
+                stableFrames = 0;
+            }
+
+            prevW = width;
+            prevH = height;
+
+            const elapsed = performance.now() - startTs;
+            const hasWaitedLongEnough = elapsed >= minElapsedMs;
+            if ((hasValidSize && stableFrames >= requiredStableFrames && hasWaitedLongEnough) || frameCount >= maxFrames) {
+                resolve(hasValidSize);
+                return;
+            }
+
+            requestAnimationFrame(tick);
+        };
+
+        requestAnimationFrame(tick);
+    });
+};
+
+/**
+ * 平滑淡入模型（替代瞬间 alpha=1 切换，避免首帧渲染变形）
+ * 
+ * 原理：即使经过稳定性检查，模型在首帧完全可见时仍可能存在
+ * 微小的渲染抖动（裁剪蒙版纹理刷新、变形器输出延迟等）。
+ * 通过 ~200ms 的 ease-out 淡入，前几帧 alpha 极低（肉眼不可见），
+ * 为渲染流水线提供额外的缓冲帧，确保模型在视觉上可辨识时
+ * 已经完全稳定。
+ * 
+ * @param {Object} model - Live2D 模型对象
+ * @param {number} loadToken - 加载令牌（用于取消检查）
+ * @param {number} duration - 淡入持续时间（毫秒），默认 200ms
+ * @returns {Promise<boolean>} - 是否成功完成淡入
+ */
+Live2DManager.prototype._fadeInModel = function(model, loadToken, duration = 200) {
+    return new Promise((resolve) => {
+        if (!model || model.destroyed || !this._isLoadTokenActive(loadToken)) {
+            resolve(false);
+            return;
+        }
+
+        const startAlpha = model.alpha; // 通常为 0.001
+        const startTime = performance.now();
+
+        const animate = () => {
+            if (!model || model.destroyed || !this._isLoadTokenActive(loadToken)) {
+                resolve(false);
+                return;
+            }
+
+            const elapsed = performance.now() - startTime;
+            const progress = Math.min(elapsed / duration, 1);
+            // ease-out (cubic): 快速上升，尾部平缓 —— 模型快速出现，最后阶段柔和过渡
+            const eased = 1 - Math.pow(1 - progress, 2.5);
+            model.alpha = startAlpha + (1 - startAlpha) * eased;
+
+            if (progress >= 1) {
+                model.alpha = 1;
+                resolve(true);
+            } else {
+                requestAnimationFrame(animate);
+            }
+        };
+
+        requestAnimationFrame(animate);
+    });
+};
+
+/**
+ * 预跑物理模拟，让弹簧/钟摆系统在虚拟时间中提前收敛到平衡态。
+ * 
+ * Live2D 模型的物理系统（头发、衣物等）在首次加载时从默认状态开始，
+ * 需要数百毫秒的模拟才能达到自然静止姿态。
+ * _waitForModelVisualStability 只检查 getBounds() 包围盒尺寸，
+ * 无法感知网格内部的物理变形（弹簧振荡、钟摆摆动）。
+ * 
+ * 本方法通过直接调用 internalModel.update() 多次小步进，
+ * 在模型不可见期间（alpha=0.001）快速模拟物理时间，
+ * 等到模型淡入时物理已完全收敛，不会出现任何变形。
+ * 
+ * 兼容 Cubism 2 和 Cubism 4（两者的 internalModel.update 签名相同）。
+ * 
+ * @param {Object} model - Live2DModel 对象（PIXI Container）
+ * @param {number} simulatedMs - 要模拟的虚拟时间（毫秒），默认 2000
+ * @param {number} stepMs - 每步时间（毫秒），默认 16（~60fps）
+ */
+Live2DManager.prototype._preTickPhysics = async function(model, simulatedMs, stepMs, loadToken) {
+    if (!model || !model.internalModel) return;
+
+    const internalModel = model.internalModel;
+
+    // 只有存在物理系统时才需要预跑
+    if (!internalModel.physics) {
+        console.log('[Live2D] 模型无物理数据，跳过物理预跑');
+        return;
+    }
+
+    // 默认参数
+    if (typeof simulatedMs !== 'number' || simulatedMs <= 0) simulatedMs = 2000;
+    if (typeof stepMs !== 'number' || stepMs <= 0) stepMs = 16;
+
+    const totalSteps = Math.ceil(simulatedMs / stepMs);
+    // 每批次运行的步数：在流畅性与延迟之间取平衡
+    // 20步 × 16ms = ~0.3ms CPU 时间，足够轻量不会卡顿主线程
+    const BATCH_SIZE = 20;
+    console.log(`[Live2D] 开始物理预跑: ${simulatedMs}ms / ${stepMs}ms步长 = ${totalSteps}步，分批${BATCH_SIZE}步/帧`);
+
+    let completed = 0;
+
+    try {
+        while (completed < totalSteps) {
+            // 在每批次开始前检查 loadToken 是否仍有效
+            if (loadToken != null && !this._isLoadTokenActive(loadToken)) {
+                console.log('[Live2D] 物理预跑中止（loadToken 已过期）');
+                return;
+            }
+            if (model.destroyed) {
+                console.log('[Live2D] 物理预跑中止（模型已销毁）');
+                return;
+            }
+
+            const batchEnd = Math.min(completed + BATCH_SIZE, totalSteps);
+            for (let i = completed; i < batchEnd; i++) {
+                internalModel.update(stepMs, model.elapsedTime);
+                model.elapsedTime += stepMs;
+            }
+            completed = batchEnd;
+
+            // 如果还有剩余步数，让出事件循环以避免主线程卡顿
+            if (completed < totalSteps) {
+                await new Promise(r => requestAnimationFrame(r));
+            }
+        }
+    } catch (e) {
+        console.warn('[Live2D] 物理预跑过程中出错:', e);
+    }
+
+    // 重置 deltaTime 累加器，确保下一次 _render() 的 internalModel.update
+    // 使用正常的帧间增量，而非包含预跑时间的巨大值
+    model.deltaTime = 0;
+
+    console.log('[Live2D] 物理预跑完成');
 };
 
 // 不再需要预解析嘴巴参数ID，保留占位以兼容旧代码调用
 Live2DManager.prototype.resolveMouthParameterId = function() { return null; };
 
 // 配置已加载的模型（私有方法，用于消除主路径和回退路径的重复代码）
-Live2DManager.prototype._configureLoadedModel = async function(model, modelPath, options) {
+Live2DManager.prototype._configureLoadedModel = async function(model, modelPath, options, loadToken) {
+    if (!this._isLoadTokenActive(loadToken)) return;
+    this._modelLoadState = 'applying';
+
     // 解析模型目录名与根路径，供资源解析使用
     try {
         let urlString = null;
@@ -195,7 +409,8 @@ Live2DManager.prototype._configureLoadedModel = async function(model, modelPath,
         const rootDir = lastSlash >= 0 ? cleanPath.substring(0, lastSlash) : '/static';
         this.modelRootPath = rootDir; // e.g. /static/mao_pro or /static/some/deeper/dir
         const parts = rootDir.split('/').filter(Boolean);
-        this.modelName = parts.length > 0 ? parts[parts.length - 1] : null;
+        const rawName = parts.length > 0 ? parts[parts.length - 1] : null;
+        try { this.modelName = rawName ? decodeURIComponent(rawName) : null; } catch (_) { this.modelName = rawName; }
         console.log('模型根路径解析:', { modelUrl: urlString, modelName: this.modelName, modelRootPath: this.modelRootPath });
     } catch (e) {
         console.warn('解析模型根路径失败，将使用默认值', e);
@@ -223,6 +438,23 @@ Live2DManager.prototype._configureLoadedModel = async function(model, modelPath,
 
     // 应用位置和缩放设置
     this.applyModelSettings(model, options);
+    // 使用极小但非零的 alpha 值隐藏模型（而非 alpha=0）
+    // 原因：PIXI 在 worldAlpha<=0 时会跳过 _render() 调用，
+    // 导致 Live2D 裁剪蒙版纹理和变形器输出未被初始化，
+    // 当 alpha 切换为 1 时首帧会出现变形。
+    // alpha=0.001 在 8-bit 显示上不可见（0.001*255≈0.26 → 0），
+    // 但能让 PIXI 正常执行渲染流水线，预热 GPU 资源。
+    model.alpha = 0.001;
+
+    // ★ CSS 合成器层级隐藏：在浏览器合成阶段（WebGL 之后）彻底隐藏画布
+    // 这是多层防护中最外层也是最可靠的一层：无论 WebGL 内部渲染管线
+    // 发生任何中间态（裁剪蒙版纹理填充、变形器首帧输出、物理振荡），
+    // CSS opacity=0 都能绝对保证用户看不到任何渲染瑕疵。
+    // 画布仍然正常渲染（不同于 display:none），GL 资源得以完整预热。
+    if (this.pixi_app.view) {
+        this.pixi_app.view.style.transition = 'none';
+        this.pixi_app.view.style.opacity = '0';
+    }
     
     // 注意：用户偏好参数的应用延迟到模型目录参数加载完成后，
     // 以确保正确的优先级顺序（模型目录参数 > 用户偏好参数）
@@ -233,9 +465,40 @@ Live2DManager.prototype._configureLoadedModel = async function(model, modelPath,
     // 设置交互性
     if (options.dragEnabled !== false) {
         this.setupDragAndDrop(model);
-        // 启用窗口大小改变时的自动吸附检测
-        this.setupResizeSnapDetection();
     }
+
+    // 修复 HitAreas 配置：如果 Name 为空，自动设置为 Id
+    if (model.internalModel && model.internalModel.settings && model.internalModel.settings.hitAreas) {
+        
+        const hitAreas_do = model.internalModel.hitAreas;
+        const hitAreas_disk = model.internalModel.settings.hitAreas;
+        let fixedCount = 0;
+        
+        hitAreas_disk.forEach(hitArea => {
+            if (!hitArea.Name || hitArea.Name === '') {
+                hitArea.Name = hitArea.Id;
+                fixedCount++;
+            }
+        });
+        
+        if (fixedCount > 0) {
+            delete hitAreas_do[''];
+            
+            hitAreas_disk.forEach(hitArea => {
+                const drawableIndex = model.internalModel.coreModel.getDrawableIndex(hitArea.Id);
+                hitAreas_do[hitArea.Id] = {
+                    id: hitArea.Id,
+                    name: hitArea.Id,
+                    index: drawableIndex
+                };
+            });
+            
+            console.log(`[HitArea] 已修复 ${fixedCount} 个 HitArea 的 Name 字段（原为空字符串）`);
+        }
+    }
+
+    // // 设置 HitArea 交互（点击 HitArea 播放对应动画）
+    // this.setupHitAreaInteraction(model);
 
     // 设置滚轮缩放
     if (options.wheelEnabled !== false) {
@@ -247,13 +510,18 @@ Live2DManager.prototype._configureLoadedModel = async function(model, modelPath,
         this.setupTouchZoom(model);
     }
 
-    // 启用鼠标跟踪
-    if (options.mouseTracking !== false) {
-        this.enableMouseTracking(model);
-    }
+    // 启用鼠标跟踪（始终启用监听器，内部根据设置决定是否执行眼睛跟踪）
+    // enableMouseTracking 包含悬浮菜单显示/隐藏逻辑，必须始终启用
+    this.enableMouseTracking(model);
+    // 同步内部状态（眼睛跟踪是否启用）
+    this._mouseTrackingEnabled = window.mouseTrackingEnabled !== false;
+    console.log(`[Live2D] 鼠标跟踪初始化: window.mouseTrackingEnabled=${window.mouseTrackingEnabled}, _mouseTrackingEnabled=${this._mouseTrackingEnabled}`);
 
     // 设置浮动按钮系统（在模型完全就绪后再绑定ticker回调）
     this.setupFloatingButtons(model);
+
+    // 应用保存的全屏跟踪设置
+    this.setFullscreenTrackingEnabled(window.live2dFullscreenTrackingEnabled === true);
     
     // 设置原来的锁按钮
     this.setupHTMLLockIcon(model);
@@ -265,16 +533,71 @@ Live2DManager.prototype._configureLoadedModel = async function(model, modelPath,
             // 保存原始 FileReferences
             this.fileReferences = settings.FileReferences || null;
 
+            // 从服务器 API 获取经过验证的表情/动作文件路径
+            // model_manager 页面在加载前已手动注入；此处为 index 等其他页面补齐相同逻辑
+            let verifiedExpressionBasenames = null;
+            try {
+                const rootParts = this.modelRootPath.split('/').filter(Boolean);
+                let filesApiUrl = null;
+                if (rootParts[0] === 'workshop' && rootParts.length >= 2 && /^\d+$/.test(rootParts[1])) {
+                    filesApiUrl = `/api/live2d/model_files_by_id/${rootParts[1]}`;
+                } else if (this.modelName) {
+                    filesApiUrl = `/api/live2d/model_files/${encodeURIComponent(this.modelName)}`;
+                }
+                if (filesApiUrl) {
+                    const filesResp = await fetch(filesApiUrl);
+                    if (filesResp.ok) {
+                        const filesData = await filesResp.json();
+                        if (filesData.success !== false && Array.isArray(filesData.expression_files)) {
+                            if (!this.fileReferences) this.fileReferences = {};
+                            this.fileReferences.Expressions = filesData.expression_files.map(file => ({
+                                Name: file.split('/').pop().replace('.exp3.json', ''),
+                                File: file
+                            }));
+                            verifiedExpressionBasenames = new Set(
+                                filesData.expression_files.map(f => f.split('/').pop().toLowerCase())
+                            );
+                            console.log('已从服务器更新表情文件引用:', this.fileReferences.Expressions.length, '个表情');
+                        }
+                        if (filesData.success !== false && Array.isArray(filesData.motion_files)) {
+                            if (!this.fileReferences) this.fileReferences = {};
+                            if (!this.fileReferences.Motions) this.fileReferences.Motions = {};
+                            this.fileReferences.Motions.PreviewAll = filesData.motion_files.map(file => ({ File: file }));
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('获取服务器端表情文件列表失败，将使用模型配置中的路径:', e);
+            }
+
             // 优先使用顶层 EmotionMapping，否则从 FileReferences 推导
             if (settings.EmotionMapping && (settings.EmotionMapping.expressions || settings.EmotionMapping.motions)) {
                 this.emotionMapping = settings.EmotionMapping;
             } else {
                 this.emotionMapping = this.deriveEmotionMappingFromFileRefs(this.fileReferences || {});
             }
+
+            // 用服务器验证过的表情文件集过滤 emotionMapping，剔除磁盘上不存在的条目
+            if (verifiedExpressionBasenames && this.emotionMapping && this.emotionMapping.expressions) {
+                for (const emotion of Object.keys(this.emotionMapping.expressions)) {
+                    const before = this.emotionMapping.expressions[emotion];
+                    if (!Array.isArray(before)) continue;
+                    this.emotionMapping.expressions[emotion] = before.filter(f => {
+                        const base = String(f).split('/').pop().toLowerCase();
+                        return verifiedExpressionBasenames.has(base);
+                    });
+                }
+                console.log('已根据服务器验证结果过滤 emotionMapping');
+            }
             console.log('已加载情绪映射:', this.emotionMapping);
         } else {
             console.warn('模型配置中未找到 settings.json，无法加载情绪映射');
         }
+    }
+
+    // 切换模型后清空失效 expression 缓存，避免污染其他模型
+    if (typeof this.clearMissingExpressionFiles === 'function') {
+        this.clearMissingExpressionFiles();
     }
 
     // 记录模型的初始参数（用于expression重置）
@@ -354,8 +677,7 @@ Live2DManager.prototype._configureLoadedModel = async function(model, modelPath,
         console.log('[Live2D Model] Ticker 已确保启动');
     }
 
-    // 模型加载完成后，延迟播放Idle情绪（给模型一些时间完全初始化）
-    // 兼容新旧两种配置格式:
+    // 检测是否有 Idle 情绪配置（兼容新旧两种格式）
     // - 新格式: EmotionMapping.motions['Idle'] / EmotionMapping.expressions['Idle']
     // - 旧格式: FileReferences.Motions['Idle'] / FileReferences.Expressions 中的 Idle 前缀
     const hasIdleInEmotionMapping = this.emotionMapping && 
@@ -364,17 +686,76 @@ Live2DManager.prototype._configureLoadedModel = async function(model, modelPath,
         (this.fileReferences.Motions?.['Idle'] || 
          (Array.isArray(this.fileReferences.Expressions) && 
           this.fileReferences.Expressions.some(e => (e.Name || '').startsWith('Idle'))));
-    
-    if (hasIdleInEmotionMapping || hasIdleInFileReferences) {
-        // 使用 setTimeout 延迟500ms，确保模型完全初始化
-        setTimeout(async () => {
-            try {
-                console.log('[Live2D Model] 模型加载完成，开始播放Idle情绪');
-                await this.setEmotion('Idle');
-            } catch (error) {
-                console.warn('[Live2D Model] 播放Idle情绪失败:', error);
+    // 注意：Idle 情绪播放已移至模型淡入完成后触发，
+    // 避免在加载过程中独立 setTimeout 可能导致的变形/抖动
+
+    // ★ 预跑物理模拟：在模型仍不可见（alpha=0.001）时，
+    // 通过虚拟时间步进让弹簧/钟摆系统收敛到平衡态。
+    // 这是解决"加载变形"的核心手段——getBounds() 稳定性检查无法
+    // 感知网格内部的物理变形，只有让物理实际跑完才能彻底消除。
+    // 先检查 loadToken 是否仍然有效，避免对过期模型执行昂贵的物理预跑
+    if (!this._isLoadTokenActive(loadToken) || !model || model.destroyed) {
+        return;
+    }
+    await this._preTickPhysics(model, 2000, 16, loadToken);
+
+    this._modelLoadState = 'settling';
+    if (this._isLoadTokenActive(loadToken)) {
+        await this._waitForModelVisualStability(model, loadToken);
+    }
+    if (!this._isLoadTokenActive(loadToken) || !model || model.destroyed) {
+        return;
+    }
+    // 在隐藏状态下先做一次边界校正，避免“先出现再瞬移”
+    if (typeof this._checkSnapRequired === 'function') {
+        try {
+            const snapInfo = await this._checkSnapRequired(model, { threshold: 300 });
+            if (snapInfo && Number.isFinite(snapInfo.targetX) && Number.isFinite(snapInfo.targetY)) {
+                model.x = snapInfo.targetX;
+                model.y = snapInfo.targetY;
             }
-        }, 500);
+        } catch (e) {
+            console.warn('[Live2D Model] 初次加载边界校正失败:', e);
+        }
+    }
+    // ★ CSS 合成器层级揭示（替代原 GL alpha 淡入）
+    // 先在 GL 层面设为完全不透明（仍被 CSS opacity:0 隐藏），
+    // 等渲染管线在 alpha=1 下输出若干完全稳定的帧后，
+    // 再通过 CSS transition 平滑揭示画布——用户只会看到最终稳定态。
+    model.alpha = 1;
+    // 等待 3 帧：让渲染器在 alpha=1 下输出完全稳定的画面
+    // （含裁剪蒙版纹理刷新、变形器最终输出、物理末帧收敛）
+    await new Promise(r => requestAnimationFrame(() =>
+        requestAnimationFrame(() => requestAnimationFrame(r))));
+    if (!this._isLoadTokenActive(loadToken) || !model || model.destroyed) {
+        return;
+    }
+    // CSS 平滑过渡揭示画布
+    if (this.pixi_app && this.pixi_app.view) {
+        const cv = this.pixi_app.view;
+        cv.style.transition = 'opacity 0.28s ease-out';
+        cv.style.opacity = '1';
+        // 过渡完成后清除内联样式，避免干扰后续功能
+        if (this._canvasRevealTimer) clearTimeout(this._canvasRevealTimer);
+        this._canvasRevealTimer = setTimeout(() => {
+            cv.style.transition = '';
+            cv.style.opacity = '';
+            this._canvasRevealTimer = null;
+        }, 320);
+    }
+    this._isModelReadyForInteraction = true;
+    this._modelLoadState = 'ready';
+
+    // 模型完全可见后播放 Idle 情绪（替代原来的独立 setTimeout）
+    if (hasIdleInEmotionMapping || hasIdleInFileReferences) {
+        try {
+            console.log('[Live2D Model] 模型淡入完成，开始播放Idle情绪');
+            this.setEmotion('Idle').catch(error => {
+                console.warn('[Live2D Model] 播放Idle情绪失败:', error);
+            });
+        } catch (error) {
+            console.warn('[Live2D Model] 播放Idle情绪失败:', error);
+        }
     }
 
     // 调用回调函数
@@ -585,6 +966,48 @@ Live2DManager.prototype.installMouthOverride = function() {
             
             // 然后在动作更新后立即覆盖参数
             try {
+                // === 点击效果平滑过渡处理 ===
+                // 当 _clickFadeState 存在时，说明点击效果正在平滑恢复中
+                // 此时跳过 savedModelParameters 和 persistentExpression 的强制写入
+                // 改为执行插值过渡
+                const fadeState = this._clickFadeState;
+                if (fadeState) {
+                    const now = performance.now();
+                    const elapsed = now - fadeState.startTime;
+                    // 防御性校验：确保 duration 为有限正数，否则视为立即完成
+                    const safeDuration = (Number.isFinite(fadeState.duration) && fadeState.duration > 0) ? fadeState.duration : 1;
+                    const linearProgress = Math.min(Math.max(elapsed / safeDuration, 0), 1);
+                    // cubic ease-out: 快进慢出
+                    const t = 1 - Math.pow(1 - linearProgress, 3);
+
+                    for (const [paramId, target] of Object.entries(fadeState.targetValues)) {
+                        const start = fadeState.startValues[paramId];
+                        if (start === undefined) continue;
+                        try {
+                            const interpolated = start + (target - start) * t;
+                            coreModel.setParameterValueById(paramId, interpolated);
+                        } catch (_) {}
+                    }
+
+                    // 口型参数不受过渡影响，照常写入
+                    for (const [id, idx] of Object.entries(mouthParamIndices)) {
+                        try {
+                            coreModel.setParameterValueByIndex(idx, this.mouthValue);
+                        } catch (_) {}
+                    }
+
+                    // 过渡完成：清除 fade 状态，恢复正常覆写逻辑
+                    if (linearProgress >= 1) {
+                        this._clickFadeState = null;
+                        console.log('[ClickEffect] 平滑过渡完成');
+                        // 确保常驻表情最终精确应用
+                        if (typeof this.applyPersistentExpressionsNative === 'function') {
+                            try { this.applyPersistentExpressionsNative(true); } catch (_) {}
+                        }
+                    }
+                    // 跳过下方的正常覆写逻辑
+                } else {
+                // === 正常帧：应用保存参数 + 常驻表情 ===
                 // 1. 应用保存的模型参数（智能叠加模式）
                 if (this.savedModelParameters && this._shouldApplySavedParams) {
                     const persistentParamIds = this.getPersistentExpressionParamIds();
@@ -644,6 +1067,7 @@ Live2DManager.prototype.installMouthOverride = function() {
                         }
                     }
                 }
+                } // 结束 else（正常帧覆写逻辑）
             } catch (_) {}
         };
         } // 结束 else 块（确保 motionManager 和 coreModel 都已准备好）
@@ -698,7 +1122,8 @@ Live2DManager.prototype.installMouthOverride = function() {
             }
             
             // 2. 写入常驻表情参数（跳过口型参数以避免覆盖lipsync）
-            if (this.persistentExpressionParamsByName) {
+            // 当点击效果正在淡入淡出时，跳过常驻表情写入以避免覆盖插值
+            if (this.persistentExpressionParamsByName && !this._clickFadeState) {
                 for (const name in this.persistentExpressionParamsByName) {
                     const params = this.persistentExpressionParamsByName[name];
                     if (Array.isArray(params)) {
@@ -826,16 +1251,17 @@ Live2DManager.prototype.applyModelSettings = function(model, options) {
     const { preferences, isMobile = false } = options;
 
     if (isMobile) {
+        model.anchor.set(0.5, 0.1);
         const scale = Math.min(
             0.5,
             window.innerHeight * 1.3 / 4000,
             window.innerWidth * 1.2 / 2000
         );
         model.scale.set(scale);
-        model.x = this.pixi_app.renderer.width * 0.5;
-        model.y = this.pixi_app.renderer.height * 0.28;
-        model.anchor.set(0.5, 0.1);
+        model.x = this.pixi_app.renderer.screen.width * 0.5;
+        model.y = this.pixi_app.renderer.screen.height * 0.28;
     } else {
+        model.anchor.set(0.65, 0.75);
         if (preferences && preferences.scale && preferences.position) {
             const scaleX = Number(preferences.scale.x);
             const scaleY = Number(preferences.scale.y);
@@ -843,12 +1269,12 @@ Live2DManager.prototype.applyModelSettings = function(model, options) {
             const posY = Number(preferences.position.y);
 
             // 当前渲染器尺寸
-            const rendererWidth = this.pixi_app.renderer.width;
-            const rendererHeight = this.pixi_app.renderer.height;
+            const rendererWidth = this.pixi_app.renderer.screen.width;
+            const rendererHeight = this.pixi_app.renderer.screen.height;
 
-            // 使用 screen 尺寸做跨分辨率归一化（不受 F12、输入法等临时视口变化影响）
-            const currentScreenW = window.screen.width;
-            const currentScreenH = window.screen.height;
+            // 使用渲染器逻辑尺寸做归一化（renderer 不再自动 resize，尺寸等价于稳定的屏幕分辨率）
+            const currentScreenW = this.pixi_app.renderer.screen.width;
+            const currentScreenH = this.pixi_app.renderer.screen.height;
             const hasValidScreen = Number.isFinite(currentScreenW) && Number.isFinite(currentScreenH) &&
                 currentScreenW > 0 && currentScreenH > 0;
 
@@ -868,14 +1294,16 @@ Live2DManager.prototype.applyModelSettings = function(model, options) {
 
             // 验证缩放值是否有效
             if (Number.isFinite(scaleX) && Number.isFinite(scaleY) &&
-                scaleX > 0 && scaleY > 0 && scaleX < 10 && scaleY < 10) {
+                scaleX >= MODEL_PREFERENCES.SCALE_MIN && scaleY >= MODEL_PREFERENCES.SCALE_MIN && scaleX < 10 && scaleY < 10) {
                 // 仅在屏幕分辨率发生"跨代"级别变化时（如 1080p→4K）才归一化缩放
                 // 普通跨屏移动（如 1600x900→2560x1440）不调整，避免用户调好的大小被改
                 const scaleRatio = Math.min(wRatio, hRatio);
                 const isExtremeChange = hasViewport && (scaleRatio > 1.8 || scaleRatio < 0.56);
                 if (isExtremeChange) {
-                    model.scale.set(scaleX * scaleRatio, scaleY * scaleRatio);
-                    console.log('屏幕分辨率大幅变化，缩放已归一化:', { wRatio, hRatio, scaleRatio });
+                    const scaledX = Math.max(MODEL_PREFERENCES.SCALE_MIN, Math.min(scaleX * scaleRatio, MODEL_PREFERENCES.SCALE_MAX));
+                    const scaledY = Math.max(MODEL_PREFERENCES.SCALE_MIN, Math.min(scaleY * scaleRatio, MODEL_PREFERENCES.SCALE_MAX));
+                    model.scale.set(scaledX, scaledY);
+                    console.log('屏幕分辨率大幅变化，缩放已归一化:', { wRatio, hRatio, scaleRatio, scaledX, scaledY });
                 } else {
                     model.scale.set(scaleX, scaleY);
                 }
@@ -913,10 +1341,9 @@ Live2DManager.prototype.applyModelSettings = function(model, options) {
                 (window.innerWidth * 0.6) / 7000
             );
             model.scale.set(scale);
-            model.x = this.pixi_app.renderer.width;
-            model.y = this.pixi_app.renderer.height;
+            model.x = this.pixi_app.renderer.screen.width;
+            model.y = this.pixi_app.renderer.screen.height;
         }
-        model.anchor.set(0.65, 0.75);
     }
 };
 
@@ -994,4 +1421,3 @@ Live2DManager.prototype.getPersistentExpressionParamIds = function() {
     
     return paramIds;
 };
-

@@ -48,6 +48,12 @@ class VRMManager {
 
         // CursorFollow 控制器（眼睛注视 + 头/脖子跟随）
         this._cursorFollow = null;
+        this._mouseTrackingEnabled = window.mouseTrackingEnabled !== false; // 鼠标跟踪启用状态
+        this._initThreePromise = null;
+        this._isDisposed = false;
+        this._activeLoadToken = 0;
+        this._loadState = 'idle';
+        this._isModelReadyForInteraction = false;
 
         // 向后兼容：保留 _windowEventHandlers 作为 core 的别名（避免破坏现有代码）；建议新代码使用 _coreWindowHandlers
         Object.defineProperty(this, '_windowEventHandlers', {
@@ -58,6 +64,75 @@ class VRMManager {
         });
 
         this._initModules();
+    }
+
+    _isLoadTokenActive(loadToken) {
+        return this._activeLoadToken === loadToken;
+    }
+
+    _waitForSceneStability(scene, loadToken, options = {}) {
+        const requiredStableFrames = options.requiredStableFrames || 2;
+        const maxFrames = options.maxFrames || 24;
+        const deltaThreshold = options.deltaThreshold || 0.02;
+        const THREE = window.THREE;
+
+        if (!scene || !THREE) {
+            return Promise.resolve(false);
+        }
+
+        return new Promise((resolve) => {
+            let stableFrames = 0;
+            let frameCount = 0;
+            let prevSize = null;
+
+            const tick = () => {
+                if (!this._isLoadTokenActive(loadToken) || !scene || !scene.parent) {
+                    resolve(false);
+                    return;
+                }
+
+                frameCount += 1;
+                let size = null;
+                try {
+                    scene.updateMatrixWorld(true);
+                    const box = new THREE.Box3().setFromObject(scene);
+                    size = box.getSize(new THREE.Vector3());
+                } catch (_) {
+                    size = null;
+                }
+
+                const hasValidSize = size &&
+                    Number.isFinite(size.x) &&
+                    Number.isFinite(size.y) &&
+                    Number.isFinite(size.z) &&
+                    size.x > 0.001 &&
+                    size.y > 0.001;
+                const isStable = hasValidSize &&
+                    prevSize &&
+                    Math.abs(size.x - prevSize.x) <= deltaThreshold &&
+                    Math.abs(size.y - prevSize.y) <= deltaThreshold &&
+                    Math.abs(size.z - prevSize.z) <= deltaThreshold;
+
+                if (isStable) {
+                    stableFrames += 1;
+                } else {
+                    stableFrames = 0;
+                }
+
+                if (hasValidSize) {
+                    prevSize = size.clone();
+                }
+
+                if ((hasValidSize && stableFrames >= requiredStableFrames) || frameCount >= maxFrames) {
+                    resolve(!!hasValidSize);
+                    return;
+                }
+
+                requestAnimationFrame(tick);
+            };
+
+            requestAnimationFrame(tick);
+        });
     }
 
     _ensureMouseLookAtResources() {
@@ -172,6 +247,14 @@ class VRMManager {
             if (!this._cursorFollow._initialized) {
                 this._cursorFollow.init(this);
             }
+            // 同步鼠标跟踪启用状态
+            const isEnabled = window.mouseTrackingEnabled !== false;
+            console.log(`[VRM] 鼠标跟踪检查: window.mouseTrackingEnabled=${window.mouseTrackingEnabled}, isEnabled=${isEnabled}`);
+            if (this._cursorFollow.isEnabled() !== isEnabled) {
+                this._cursorFollow.setEnabled(isEnabled);
+            }
+            // 同步内部状态
+            this._mouseTrackingEnabled = isEnabled;
             // CursorFollow 拥有自己的 eyesTarget，旧 _lookAtTarget 不再需要
             return;
         }
@@ -485,25 +568,47 @@ class VRMManager {
     }
 
     async initThreeJS(canvasId, containerId, lightingConfig = null) {
+        if (this._initThreePromise) {
+            return await this._initThreePromise;
+        }
+        this._isDisposed = false;
+
         // 检查是否已完全初始化（不仅检查 scene，还要检查 camera 和 renderer）
         if (this.scene && this.camera && this.renderer) {
             this._initMouseLookAtTracking();
             this._isInitialized = true;
             return true;
         }
-        if (!this.clock && window.THREE) this.clock = new window.THREE.Clock();
-        this._initModules();
-        if (!this.core) {
-            const errorMsg = window.t ? window.t('vrm.error.coreNotLoaded') : 'VRMCore 尚未加载';
-            throw new Error(errorMsg);
+
+        this._initThreePromise = (async () => {
+            if (!this.clock && window.THREE) this.clock = new window.THREE.Clock();
+            this._initModules();
+            if (!this.core) {
+                const errorMsg = window.t ? window.t('vrm.error.coreNotLoaded') : 'VRMCore 尚未加载';
+                throw new Error(errorMsg);
+            }
+            await this.core.init(canvasId, containerId, lightingConfig);
+            if (this._isDisposed) return false;
+            if (this.interaction) this.interaction.initDragAndZoom();
+            this._initMouseLookAtTracking();
+            this.startAnimateLoop();
+            // 设置初始化标志
+            this._isInitialized = true;
+            return true;
+        })();
+
+        try {
+            return await this._initThreePromise;
+        } finally {
+            this._initThreePromise = null;
         }
-        await this.core.init(canvasId, containerId, lightingConfig);
-        if (this.interaction) this.interaction.initDragAndZoom();
-        this._initMouseLookAtTracking();
-        this.startAnimateLoop();
-        // 设置初始化标志
-        this._isInitialized = true;
-        return true;
+    }
+
+    async ensureThreeReady(canvasId, containerId, lightingConfig = null) {
+        if (this.scene && this.camera && this.renderer && this._isInitialized) {
+            return true;
+        }
+        return await this.initThreeJS(canvasId, containerId, lightingConfig);
     }
 
     startAnimateLoop() {
@@ -522,11 +627,13 @@ class VRMManager {
 
             this._animationFrameId = requestAnimationFrame(animateLoop);
 
-            // 帧率限制：根据 targetFrameRate 跳帧
+            // 帧率限制：根据 targetFrameRate 跳帧（0 = 不限帧，跟随 VSync）
             const now = performance.now();
-            const targetFps = window.targetFrameRate || 60;
-            const frameInterval = 1000 / targetFps;
-            if (now - this._lastRenderTime < frameInterval * 0.9) return;
+            const targetFps = typeof window.targetFrameRate === 'number' ? window.targetFrameRate : 60;
+            if (targetFps > 0) {
+                const frameInterval = 1000 / targetFps;
+                if (now - this._lastRenderTime < frameInterval * 0.9) return;
+            }
             this._lastRenderTime = now;
 
             // 获取时间增量并限制最大值，防止切屏或卡顿导致物理"爆炸"
@@ -559,15 +666,27 @@ class VRMManager {
 
                 // 3. 设置 lookAt 目标
                 if (this.currentModel.vrm.lookAt) {
-                    if (this._cursorFollow && this._cursorFollow.eyesTarget) {
-                        this.currentModel.vrm.lookAt.target = this._cursorFollow.eyesTarget;
+                    if (this._cursorFollow && this._cursorFollow.eyesTarget && this._cursorFollow.isEnabled()) {
+                        // CursorFollow 已加载且启用 → 使用 eyesTarget
+                        if (this.currentModel.vrm.lookAt.target !== this._cursorFollow.eyesTarget) {
+                            this.currentModel.vrm.lookAt.target = this._cursorFollow.eyesTarget;
+                        }
+                    } else if (this._cursorFollow && !this._cursorFollow.isEnabled()) {
+                        // CursorFollow 已加载但禁用 → 设为 null，SDK 内部自动跳过 lookAt 求解
+                        if (this.currentModel.vrm.lookAt.target !== null) {
+                            this.currentModel.vrm.lookAt.target = null;
+                        }
                     } else {
+                        // CursorFollow 未加载时的旧 fallback 逻辑（保持兼容）
                         if (this._lookAtTarget && this._lookAtDesiredPoint) {
                             const smoothTime = Math.max(0.01, this._lookAtSmoothTime);
                             const alpha = Math.min(1, 1 - Math.exp(-delta / smoothTime));
                             this._lookAtTarget.position.lerp(this._lookAtDesiredPoint, alpha);
                         }
-                        this.currentModel.vrm.lookAt.target = this._lookAtTarget || this.camera;
+                        const fallbackLookAtTarget = this._lookAtTarget || this.camera;
+                        if (this.currentModel.vrm.lookAt.target !== fallbackLookAtTarget) {
+                            this.currentModel.vrm.lookAt.target = fallbackLookAtTarget;
+                        }
                     }
                 }
 
@@ -626,6 +745,67 @@ class VRMManager {
     }
 
     /**
+     * 设置鼠标追踪性能档位
+     * @param {'none'|'low'|'medium'|'high'} level
+     */
+    setCursorFollowPerformance(level = 'high') {
+        const normalized = typeof level === 'string' ? level.toLowerCase() : 'high';
+        const finalLevel = (normalized === 'none' || normalized === 'low' || normalized === 'medium' || normalized === 'high')
+            ? normalized
+            : 'high';
+
+        if (this._cursorFollow && typeof this._cursorFollow.setPerformanceLevel === 'function') {
+            this._cursorFollow.setPerformanceLevel(finalLevel);
+        }
+        // 保留全局状态，便于初始化前设置
+        window.cursorFollowPerformanceLevel = finalLevel;
+        return finalLevel;
+    }
+
+    /**
+     * 获取当前鼠标追踪性能档位
+     * @returns {'none'|'low'|'medium'|'high'}
+     */
+    getCursorFollowPerformance() {
+        if (this._cursorFollow && typeof this._cursorFollow.getPerformanceLevel === 'function') {
+            return this._cursorFollow.getPerformanceLevel();
+        }
+        return window.cursorFollowPerformanceLevel || 'high';
+    }
+
+    /**
+     * 重置模型位置/旋转/缩放到默认值（供外部调用，如 N.E.K.O.-PC）
+     */
+    resetModelPosition() {
+        const model = this.currentModel;
+        const scene = model?.vrm?.scene ?? model?.scene;
+        if (!scene) return;
+
+        const vrm = model.vrm || model;
+
+        scene.position.set(0, 0, 0);
+        scene.rotation.set(0, 0, 0);
+        this.setModelScaleScalar(1);
+
+        if (window.VRMOrientationDetector && vrm) {
+            const detectedRotation = window.VRMOrientationDetector.detectAndFixOrientation(vrm, null);
+            window.VRMOrientationDetector.applyRotation(vrm, detectedRotation);
+        }
+
+        const modelUrl = model.url || '';
+        if (modelUrl && this.core && typeof this.core.saveUserPreferences === 'function') {
+            this.core.saveUserPreferences(
+                modelUrl,
+                { x: 0, y: 0, z: 0 },
+                { x: 1, y: 1, z: 1 },
+                { x: scene.rotation.x, y: scene.rotation.y, z: scene.rotation.z }
+            ).catch(err => console.warn('[VRM Manager] 保存重置偏好失败:', err));
+        }
+
+        console.log('[VRM Manager] 模型位置已重置');
+    }
+
+    /**
      * 暂停渲染循环（用于节省资源，例如进入模型管理界面时）
      */
     pauseRendering() {
@@ -647,6 +827,9 @@ class VRMManager {
     }
 
     async loadModel(modelUrl, options = {}) {
+        const loadToken = ++this._activeLoadToken;
+        this._loadState = 'preparing';
+        this._isModelReadyForInteraction = false;
         this._initModules();
         if (!this.core) this.core = new window.VRMCore(this);
 
@@ -662,7 +845,11 @@ class VRMManager {
             const container = document.getElementById(containerId);
 
             if (canvas && container) {
-                await this.initThreeJS(canvasId, containerId);
+                const threeReady = await this.ensureThreeReady(canvasId, containerId);
+                if (!threeReady) {
+                    this._loadState = 'idle';
+                    return null;
+                }
             } else {
                 const errorMsg = window.t
                     ? window.t('vrm.error.sceneNotInitialized')
@@ -672,14 +859,18 @@ class VRMManager {
         }
 
 
-        // 设置画布初始状态为透明，并添加 CSS 过渡效果
+        // 先无过渡地立即隐藏画布，避免旧过渡导致加载期闪帧
         if (this.renderer && this.renderer.domElement) {
+            this.renderer.domElement.style.transition = 'none';
             this.renderer.domElement.style.opacity = '0';
-            this.renderer.domElement.style.transition = 'opacity 1.0s ease-in-out';
         }
 
         // 加载模型
         const result = await this.core.loadModel(modelUrl, options);
+        if (!this._isLoadTokenActive(loadToken)) {
+            this._loadState = 'idle';
+            return result;
+        }
 
         // 模型切换后重置头部跟踪状态（滤波器/权重/累计角度）
         if (this._cursorFollow) {
@@ -711,6 +902,8 @@ class VRMManager {
 
         // 辅助函数：显示模型并淡入画布
         const showAndFadeIn = () => {
+            if (!this._isLoadTokenActive(loadToken)) return;
+            if (this._loadState !== 'ready') return;
             if (this.currentModel?.vrm?.scene) {
                 // 启用物理
                 this.enablePhysics = true;
@@ -749,44 +942,41 @@ class VRMManager {
 
                 this.currentModel.vrm.scene.visible = true;
                 requestAnimationFrame(() => {
+                    if (!this._isLoadTokenActive(loadToken)) return;
                     if (this.renderer && this.renderer.domElement) {
+                        this.renderer.domElement.style.transition = 'opacity 1.0s ease-in-out';
                         this.renderer.domElement.style.opacity = '1';
                     }
                 });
             }
         };
 
-        // 自动播放待机动画
+        // 加载待机动画（作为 Promise，与场景稳定性并行等待）
+        let animationReady = Promise.resolve();
         if (options.autoPlay !== false) {
-            const tryPlayAnimation = async (retries = 10) => {
-                if (!this.currentModel || !this.currentModel.vrm) {
-                    if (this._retryTimerId) {
-                        clearTimeout(this._retryTimerId);
-                        this._retryTimerId = null;
-                    }
-                    return;
-                }
+            animationReady = (async () => {
+                if (!this.currentModel || !this.currentModel.vrm) return;
 
-                if (!this.animation) {
-                    this._initModules();
-                    if (!this.animation && typeof window.VRMAnimation === 'undefined') {
-                        if (retries > 0) {
-                            if (this._retryTimerId) {
-                                clearTimeout(this._retryTimerId);
-                            }
-                            // 将 setTimeout 的返回值赋值给 _retryTimerId，以便 dispose() 可以清理
-                            this._retryTimerId = setTimeout(() => {
-                                this._retryTimerId = null; // 回调执行时清除引用
-                                tryPlayAnimation(retries - 1);
-                            }, 100);
-                            return;
-                        } else {
-                            console.warn('[VRM Manager] VRMAnimation 模块未加载，跳过自动播放');
-                            this._retryTimerId = null;
-                            showAndFadeIn();
-                            return;
-                        }
+                let retries = 10;
+                while (retries > 0) {
+                    if (!this._isLoadTokenActive(loadToken)) return;
+                    if (!this.currentModel || !this.currentModel.vrm) return;
+
+                    if (!this.animation) this._initModules();
+                    if (this.animation) break;
+
+                    if (typeof window.VRMAnimation !== 'undefined') {
+                        this._initModules();
+                        break;
                     }
+
+                    await new Promise(resolve => {
+                        this._retryTimerId = setTimeout(() => {
+                            this._retryTimerId = null;
+                            resolve();
+                        }, 100);
+                    });
+                    retries--;
                 }
 
                 if (this._retryTimerId) {
@@ -794,31 +984,24 @@ class VRMManager {
                     this._retryTimerId = null;
                 }
 
-                if (this.animation) {
-                    try {
-                        await this.playVRMAAnimation(DEFAULT_LOOP_ANIMATION, {
-                            loop: true,
-                            immediate: true,
-                            isIdle: true
-                        });
-                        showAndFadeIn();
-                    } catch (err) {
-                        console.warn('[VRM Manager] 自动播放失败，强制显示:', err);
-                        showAndFadeIn();
-                    }
-                } else {
-                    console.warn('[VRM Manager] animation 模块初始化失败，跳过自动播放');
-                    showAndFadeIn();
+                if (!this.animation) {
+                    console.warn('[VRM Manager] VRMAnimation 模块未加载，跳过自动播放');
+                    return;
                 }
-            };
+                const currentLoadToken = this._activeLoadToken;
+                if (loadToken !== currentLoadToken) return;
 
-            // 将初始 setTimeout 的返回值赋值给 _retryTimerId，以便 dispose() 可以清理
-            this._retryTimerId = setTimeout(() => {
-                this._retryTimerId = null; // 回调执行时清除引用
-                tryPlayAnimation();
-            }, 100);
-        } else {
-            showAndFadeIn();
+                try {
+                    if (!this._isLoadTokenActive(loadToken)) return;
+                    await this.playVRMAAnimation(DEFAULT_LOOP_ANIMATION, {
+                        loop: true,
+                        immediate: true,
+                        isIdle: true
+                    });
+                } catch (err) {
+                    console.warn('[VRM Manager] 自动播放失败:', err);
+                }
+            })();
         }
 
         if (this.expression) {
@@ -826,6 +1009,49 @@ class VRMManager {
         }
         if (this.setupFloatingButtons) {
             this.setupFloatingButtons();
+        }
+
+        // 应用保存的局部跟踪设置
+        if (this._cursorFollow) {
+            this._cursorFollow.setLocalTrackingEnabled(window.humanoidLocalTrackingEnabled === true);
+        }
+
+        // 同时等待场景稳定和待机动画加载完成，确保模型不以 T-pose 显示
+        this._loadState = 'settling';
+        const stabilityPromise = (result && result.vrm && result.vrm.scene && this._isLoadTokenActive(loadToken))
+            ? this._waitForSceneStability(result.vrm.scene, loadToken)
+            : Promise.resolve(false);
+        const [stabilityResult] = await Promise.all([stabilityPromise, animationReady]);
+
+        if (this._isLoadTokenActive(loadToken) && stabilityResult === true) {
+            this._loadState = 'ready';
+            this._isModelReadyForInteraction = true;
+
+            // 首次加载围栏：检查模型是否在屏幕外，如果是则立即校正（不动画）
+            if (this.interaction && this.currentModel?.vrm?.scene) {
+                try {
+                    const currentPos = this.currentModel.vrm.scene.position.clone();
+                    const correctedPos = this.interaction.clampModelPosition(currentPos, { minVisiblePixels: 300 });
+                    if (!currentPos.equals(correctedPos)) {
+                        this.currentModel.vrm.scene.position.copy(correctedPos);
+                        console.log('[VRM Manager] 首次加载围栏已校正模型位置');
+                    }
+                } catch (e) {
+                    console.warn('[VRM Manager] 首次加载围栏检查失败:', e);
+                }
+            }
+
+            window.dispatchEvent(new CustomEvent('vrm-model-loaded', {
+                detail: {
+                    modelUrl,
+                    model: this.currentModel
+                }
+            }));
+
+            showAndFadeIn();
+        } else if (this._isLoadTokenActive(loadToken)) {
+            this._loadState = 'idle';
+            this._isModelReadyForInteraction = false;
         }
         return result;
     }
@@ -914,6 +1140,12 @@ class VRMManager {
      */
     async dispose() {
         console.log('[VRM Manager] 开始完整清理 VRM 资源...');
+        this._isDisposed = true;
+
+        // Invalidate any in-flight loadModel() async callbacks
+        ++this._activeLoadToken;
+        this._loadState = 'idle';
+        this._isModelReadyForInteraction = false;
 
         // 1. 取消动画循环（最关键）
         if (this._animationFrameId) {
@@ -939,6 +1171,8 @@ class VRMManager {
         // 5. 清理模型资源（调用 core.disposeVRM）
         if (this.core && typeof this.core.disposeVRM === 'function') {
             await this.core.disposeVRM();
+            // 若 dispose 期间发生了重新初始化，则终止本次清理，避免清掉新实例
+            if (!this._isDisposed) return;
         }
 
         // 6. 清理动画模块（先停止动画，再清理资源）
@@ -1107,6 +1341,88 @@ class VRMManager {
         this._isInitialized = false;
 
         console.log('[VRM Manager] VRM 资源清理完成');
+    }
+
+    /**
+     * 设置鼠标跟踪是否启用
+     * @param {boolean} enabled - 是否启用鼠标跟踪
+     */
+    setMouseTrackingEnabled(enabled) {
+        this._mouseTrackingEnabled = enabled;
+        window.mouseTrackingEnabled = enabled;
+
+        if (this._cursorFollow) {
+            this._cursorFollow.setEnabled(enabled);
+        }
+    }
+
+    /**
+     * 获取鼠标跟踪是否启用
+     * @returns {boolean}
+     */
+    isMouseTrackingEnabled() {
+        return this._mouseTrackingEnabled !== false;
+    }
+
+    /**
+     * 获取 VRM 模型在屏幕上的边界（用于局部跟踪）
+     * @returns {Object|null} 边界对象 { left, right, top, bottom, width, height, centerX, centerY } 或 null
+     */
+    getModelScreenBounds() {
+        if (!this.currentModel || !this.camera || !this.renderer) {
+            return null;
+        }
+
+        const canvasRect = this.renderer.domElement.getBoundingClientRect();
+        const canvasWidth = canvasRect.width;
+        const canvasHeight = canvasRect.height;
+
+        const scene = this.currentModel.vrm?.scene ?? this.currentModel.scene;
+        if (!scene) return null;
+
+        const box = new window.THREE.Box3().setFromObject(scene);
+        const corners = [
+            new window.THREE.Vector3(box.min.x, box.min.y, box.min.z),
+            new window.THREE.Vector3(box.min.x, box.min.y, box.max.z),
+            new window.THREE.Vector3(box.min.x, box.max.y, box.min.z),
+            new window.THREE.Vector3(box.min.x, box.max.y, box.max.z),
+            new window.THREE.Vector3(box.max.x, box.min.y, box.min.z),
+            new window.THREE.Vector3(box.max.x, box.min.y, box.max.z),
+            new window.THREE.Vector3(box.max.x, box.max.y, box.min.z),
+            new window.THREE.Vector3(box.max.x, box.max.y, box.max.z)
+        ];
+
+        let screenLeft = Infinity, screenRight = -Infinity;
+        let screenTop = Infinity, screenBottom = -Infinity;
+
+        for (const corner of corners) {
+            corner.project(this.camera);
+            const sx = canvasRect.left + (corner.x * 0.5 + 0.5) * canvasWidth;
+            const sy = canvasRect.top + (-corner.y * 0.5 + 0.5) * canvasHeight;
+            screenLeft = Math.min(screenLeft, sx);
+            screenRight = Math.max(screenRight, sx);
+            screenTop = Math.min(screenTop, sy);
+            screenBottom = Math.max(screenBottom, sy);
+        }
+
+        if (!Number.isFinite(screenLeft) || !Number.isFinite(screenRight) ||
+            !Number.isFinite(screenTop) || !Number.isFinite(screenBottom)) {
+            return null;
+        }
+
+        const width = screenRight - screenLeft;
+        const height = screenBottom - screenTop;
+
+        return {
+            left: screenLeft,
+            right: screenRight,
+            top: screenTop,
+            bottom: screenBottom,
+            width: width,
+            height: height,
+            centerX: (screenLeft + screenRight) / 2,
+            centerY: (screenTop + screenBottom) / 2
+        };
     }
 }
 

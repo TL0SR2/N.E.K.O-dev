@@ -23,9 +23,10 @@
             '/static/vrm-manager.js'
         ];
 
-        // 必须顺序加载的 UI 模块（vrm-ui-buttons.js 依赖 vrm-ui-popup.js 中定义的 createPopup）
+        // 必须顺序加载的 UI 模块（公共定位 → 公共 mixin → 统一配置 → buttons）
+        // avatar-popup-common, avatar-ui-popup, avatar-ui-popup-config, avatar-ui-buttons
+        // 已由 HTML 静态 <script> 加载，此处不再重复加载
         const sequentialModules = [
-            '/static/vrm-ui-popup.js',
             '/static/vrm-ui-buttons.js'
         ];
 
@@ -433,6 +434,12 @@ async function initVRMModel() {
             return;
         }
 
+        // 如果是 MMD 子类型，跳过 VRM 加载（由 mmd-init.js 处理）
+        if ((window.lanlan_config?.live3d_sub_type || '').toLowerCase() === 'mmd') {
+            console.log('[VRM Init] MMD 子类型，跳过 VRM 加载');
+            return;
+        }
+
         // 安全获取 window.vrmModel，处理各种边界情况（包括字符串 "undefined" 和 "null"）
         let targetModelPath = null;
         if (window.vrmModel !== undefined && window.vrmModel !== null) {
@@ -512,9 +519,10 @@ async function initVRMModel() {
                     if (window.live2dManager.pixi_app.stage) {
                         window.live2dManager.pixi_app.stage.removeChildren();
                     }
-                    // 完全销毁PIXI应用释放WebGL上下文
+                    // 销毁PIXI应用释放WebGL上下文，但保留canvas元素在DOM中
+                    // 第一个参数传 false：不移除 canvas view，以便切回 Live2D 时复用
                     try {
-                        window.live2dManager.pixi_app.destroy(true, {
+                        window.live2dManager.pixi_app.destroy(false, {
                             children: true,
                             texture: true,
                             baseTexture: true
@@ -523,6 +531,12 @@ async function initVRMModel() {
                         console.warn('[VRM Init] PIXI应用销毁时出现警告:', destroyError);
                     }
                     window.live2dManager.pixi_app = null;
+                    // 注销 initPIXI 注册的 resize 监听器，避免泄露和空引用报错
+                    if (window.live2dManager._screenChangeHandler) {
+                        window.removeEventListener('resize', window.live2dManager._screenChangeHandler);
+                        window.live2dManager._screenChangeHandler = null;
+                    }
+                    window.live2dManager.isInitialized = false;
                 }
             } catch (cleanupError) {
                 console.warn('[VRM Init] Live2D清理时出现警告:', cleanupError);

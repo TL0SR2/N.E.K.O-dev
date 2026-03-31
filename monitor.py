@@ -8,7 +8,7 @@ import json
 import os
 import logging
 from config import MONITOR_SERVER_PORT
-from utils.config_manager import get_config_manager
+from utils.config_manager import get_config_manager, get_reserved
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -46,11 +46,18 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory=get_resource_path("static")), name="static")
 _config_manager = get_config_manager()
 
-# 挂载用户Live2D目录（与main_server.py保持一致）
-user_live2d_path = str(_config_manager.live2d_dir)
-if os.path.exists(user_live2d_path):
-    app.mount("/user_live2d", StaticFiles(directory=user_live2d_path), name="user_live2d")
-    logger.info(f"已挂载用户Live2D目录: {user_live2d_path}")
+# 挂载用户Live2D目录（与main_server.py保持一致，CFA感知）
+_readable_live2d = _config_manager.readable_live2d_dir
+_serve_live2d_path = str(_readable_live2d) if _readable_live2d else str(_config_manager.live2d_dir)
+if os.path.exists(_serve_live2d_path):
+    app.mount("/user_live2d", StaticFiles(directory=_serve_live2d_path), name="user_live2d")
+    logger.info(f"已挂载用户Live2D目录: {_serve_live2d_path}")
+# CFA 场景：可写回退目录额外挂载
+if _readable_live2d and str(_config_manager.live2d_dir) != _serve_live2d_path:
+    _writable_live2d_path = str(_config_manager.live2d_dir)
+    if os.path.exists(_writable_live2d_path):
+        app.mount("/user_live2d_local", StaticFiles(directory=_writable_live2d_path), name="user_live2d_local")
+        logger.info(f"已挂载本地Live2D目录(CFA回退): {_writable_live2d_path}")
 
 # 挂载创意工坊目录（与main_server.py保持一致）
 workshop_path = get_default_workshop_folder()
@@ -67,13 +74,27 @@ async def get_page_config(lanlan_name: str = ""):
     """获取页面配置（lanlan_name 和 model_path）"""
     try:
         # 获取角色数据
-        _, her_name, _, lanlan_basic_config, _, _, _, _, _, _ = _config_manager.get_character_data()
+        _, her_name, _, lanlan_basic_config, _, _, _, _, _ = _config_manager.get_character_data()
         
         # 如果提供了 lanlan_name 参数，使用它；否则使用当前角色
         target_name = lanlan_name if lanlan_name else her_name
         
-        # 获取 live2d 字段
-        live2d = lanlan_basic_config.get(target_name, {}).get('live2d', 'mao_pro')
+        # 获取 live2d 字段（兼容 _reserved 新结构）
+        live2d_model_path = get_reserved(
+            lanlan_basic_config.get(target_name, {}),
+            'avatar',
+            'live2d',
+            'model_path',
+            default='mao_pro',
+            legacy_keys=('live2d',),
+        )
+        if not isinstance(live2d_model_path, str):
+            live2d_model_path = str(live2d_model_path) if live2d_model_path is not None else 'mao_pro'
+        if live2d_model_path.endswith('.model3.json'):
+            parts = live2d_model_path.replace('\\', '/').split('/')
+            live2d = parts[-2] if len(parts) >= 2 else parts[-1].removesuffix('.model3.json')
+        else:
+            live2d = live2d_model_path
         
         # 查找所有模型
         models = find_models()

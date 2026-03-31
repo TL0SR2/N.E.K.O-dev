@@ -1,10 +1,13 @@
 import json
 import asyncio
-from langchain_openai import ChatOpenAI
+from utils.llm_client import create_chat_llm
 from openai import APIConnectionError, InternalServerError, RateLimitError
 from config import SETTING_PROPOSER_MODEL, SETTING_VERIFIER_MODEL
+from config import CHARACTER_RESERVED_FIELDS
 from utils.config_manager import get_config_manager
-from config.prompts_sys import settings_extractor_prompt, settings_verifier_prompt
+from utils.token_tracker import set_call_type
+from utils.file_utils import atomic_write_json
+from config.prompts_memory import settings_extractor_prompt, settings_verifier_prompt
 
 
 class ImportantSettingsManager:
@@ -12,20 +15,27 @@ class ImportantSettingsManager:
         self.settings = {}
         self.settings_file = None
         self._config_manager = get_config_manager()
+        self._excluded_profile_fields = set(CHARACTER_RESERVED_FIELDS)
     
     def _get_proposer(self):
         """动态获取Proposer LLM实例以支持配置热重载"""
         api_config = self._config_manager.get_model_api_config('summary')
-        return ChatOpenAI(model=SETTING_PROPOSER_MODEL, base_url=api_config['base_url'], api_key=api_config['api_key'], temperature=0.5)
-    
+        return create_chat_llm(
+            SETTING_PROPOSER_MODEL, api_config['base_url'],
+            api_config['api_key'], temperature=0.5,
+        )
+
     def _get_verifier(self):
         """动态获取Verifier LLM实例以支持配置热重载"""
         api_config = self._config_manager.get_model_api_config('summary')
-        return ChatOpenAI(model=SETTING_VERIFIER_MODEL, base_url=api_config['base_url'], api_key=api_config['api_key'], temperature=0.5)
+        return create_chat_llm(
+            SETTING_VERIFIER_MODEL, api_config['base_url'],
+            api_config['api_key'], temperature=0.5,
+        )
 
     def load_settings(self):
         # It is important to update the settings with the latest character on-disk files
-        _, _, master_basic_config, lanlan_basic_config, name_mapping, _, _, _, setting_store, _ = self._config_manager.get_character_data()
+        _, _, master_basic_config, lanlan_basic_config, name_mapping, _, _, setting_store, _ = self._config_manager.get_character_data()
         self.settings_file = setting_store
         self.master_basic_config = master_basic_config
         self.lanlan_basic_config = lanlan_basic_config
@@ -33,28 +43,21 @@ class ImportantSettingsManager:
 
         for i in self.settings_file:
             try:
-                # 系统保留字段 - 不应该被记忆系统读取
-                self.lanlan_basic_config[i].pop('system_prompt', None)
-                self.lanlan_basic_config[i].pop('live2d', None)
-                self.lanlan_basic_config[i].pop('voice_id', None)
-                # 前端渲染字段 - 仅用于模型显示，不应该出现在 prompt 中
-                self.lanlan_basic_config[i].pop('model_type', None)
-                self.lanlan_basic_config[i].pop('vrm', None)
-                self.lanlan_basic_config[i].pop('vrm_animation', None)
-                self.lanlan_basic_config[i].pop('lighting', None)
-                # 工坊保留字段 - 由工坊系统管理，不应该被记忆系统读取
-                for workshop_field in ['原始数据', '文件路径', '创意工坊物品ID', 
-                                       'description', 'tags', 'name',
-                                       '描述', '标签', '关键词', 'live2d_item_id']:
-                    self.lanlan_basic_config[i].pop(workshop_field, None)
+                # 角色档案保留字段不参与记忆提取
+                for reserved_field in self._excluded_profile_fields:
+                    self.lanlan_basic_config[i].pop(reserved_field, None)
                 with open(self.settings_file[i], 'r', encoding='utf-8') as f:
                     self.settings[i] = json.load(f)
             except (FileNotFoundError, json.JSONDecodeError):
                 self.settings[i] = {i: {}, self.name_mapping['human']: {}}
 
     def save_settings(self, lanlan_name):
-        with open(self.settings_file[lanlan_name], 'w', encoding='utf-8') as f:
-            json.dump(self.settings[lanlan_name], f, indent=2, ensure_ascii=False)
+        atomic_write_json(
+            self.settings_file[lanlan_name],
+            self.settings[lanlan_name],
+            indent=2,
+            ensure_ascii=False,
+        )
 
     async def detect_and_resolve_contradictions(self, old_settings, new_settings, lanlan_name):
         # 使用LLM检测矛盾并解决它们
@@ -65,6 +68,7 @@ class ImportantSettingsManager:
         max_retries = 3
         while retries < max_retries:
             try:
+                set_call_type("memory_settings")
                 verifier = self._get_verifier()
                 response = await verifier.ainvoke(prompt)
                 result = response.content
@@ -118,6 +122,7 @@ class ImportantSettingsManager:
         new_settings = ""
         while retries < max_retries:
             try:
+                set_call_type("memory_settings")
                 proposer = self._get_proposer()
                 response = await proposer.ainvoke(prompt)
             except (APIConnectionError, InternalServerError, RateLimitError) as e:

@@ -5,33 +5,112 @@ import websockets
 import json
 import base64
 import time
-import logging
 import numpy as np
+from pathlib import Path
 
 from typing import Optional, Callable, Dict, Any, Awaitable
 from enum import Enum
 from config import NATIVE_IMAGE_MIN_INTERVAL, IMAGE_IDLE_RATE_MULTIPLIER
 from utils.config_manager import get_config_manager
 from utils.audio_processor import AudioProcessor
+from utils.file_utils import atomic_write_json
 from utils.frontend_utils import calculate_text_similarity
+from utils.logger_config import get_module_logger
+from utils.ssl_env_diagnostics import write_ssl_diagnostic
 
-# Gemini Live API SDK
+# Gemini Live API SDK (startup-time import)
 try:
     from google import genai
     from google.genai import types
     GEMINI_AVAILABLE = True
-except ImportError:
+    _GEMINI_IMPORT_ERROR = None
+except Exception as e:
     GEMINI_AVAILABLE = False
+    _GEMINI_IMPORT_ERROR = e
     genai = None
+    types = None
 
 # Setup logger for this module
-logger = logging.getLogger(__name__)
+logger = get_module_logger(__name__, "Main")
 
 class TurnDetectionMode(Enum):
     SERVER_VAD = "server_vad"
     MANUAL = "manual"
 
 _config_manager = get_config_manager()
+
+if not GEMINI_AVAILABLE and _GEMINI_IMPORT_ERROR is not None:
+    diagnostics_dir = Path(_config_manager.app_docs_dir) / "logs" / "diagnostics"
+    sentinel_path = diagnostics_dir / "gemini_sdk_import_failed.last.json"
+    throttle_window_seconds = 24 * 60 * 60
+    now_ts = time.time()
+
+    recent_diag_path = None
+    try:
+        if sentinel_path.exists():
+            with open(sentinel_path, "r", encoding="utf-8") as f:
+                sentinel_data = json.load(f)
+            sentinel_diag_path = sentinel_data.get("path")
+            sentinel_ts = float(sentinel_data.get("timestamp", 0))
+            if sentinel_diag_path and (now_ts - sentinel_ts) < throttle_window_seconds:
+                if Path(sentinel_diag_path).exists():
+                    recent_diag_path = sentinel_diag_path
+    except Exception as sentinel_err:
+        logger.error(f"Gemini diagnostic sentinel read failed: {sentinel_err}")
+
+    if recent_diag_path is None:
+        try:
+            if diagnostics_dir.exists():
+                for diag_file in diagnostics_dir.glob("ssl_diagnostic_*.json"):
+                    try:
+                        with open(diag_file, "r", encoding="utf-8") as f:
+                            payload = json.load(f)
+                        if payload.get("event") != "gemini_sdk_import_failed":
+                            continue
+                        file_mtime = diag_file.stat().st_mtime
+                        if (now_ts - file_mtime) < throttle_window_seconds:
+                            if (
+                                recent_diag_path is None
+                                or file_mtime > Path(recent_diag_path).stat().st_mtime
+                            ):
+                                recent_diag_path = str(diag_file)
+                    except Exception as diag_file_err:
+                        logger.debug(
+                            "Skipping diagnostic file scan due to parse/read error: %s (%s)",
+                            diag_file,
+                            diag_file_err,
+                        )
+                        continue
+        except Exception as scan_err:
+            logger.error(f"Gemini diagnostic scan failed: {scan_err}")
+
+    if recent_diag_path:
+        logger.warning(f"Gemini SDK import failed, recent diagnostic exists: {recent_diag_path}")
+    else:
+        try:
+            diag_path = write_ssl_diagnostic(
+                event="gemini_sdk_import_failed",
+                output_dir=str(diagnostics_dir),
+                error=_GEMINI_IMPORT_ERROR,
+                extra={"stage": "module_import"},
+            )
+            if diag_path:
+                logger.warning(f"Gemini SDK import failed, diagnostic saved: {diag_path}")
+                try:
+                    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+                    atomic_write_json(
+                        sentinel_path,
+                        {
+                            "path": diag_path,
+                            "timestamp": now_ts,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                except Exception as sentinel_write_err:
+                    logger.error(f"Gemini diagnostic sentinel write failed: {sentinel_write_err}")
+        except Exception as diag_err:
+            logger.error(f"Gemini SDK diagnostic write failed: {diag_err}")
 
 
 class OmniRealtimeClient:
@@ -121,6 +200,7 @@ class OmniRealtimeClient:
         self._modalities = ["text", "audio"]
         self._audio_in_buffer = False
         self._skip_until_next_response = False
+        self._audio_delta_count = 0  # diagnostic: count audio.delta events per session
         # Track image recognition per turn
         self._image_recognized_this_turn = False
         self._image_sent_this_turn = False
@@ -148,8 +228,14 @@ class OmniRealtimeClient:
             on_silence_reset=self._on_silence_reset  # 静音重置时发送 input_audio_buffer.clear
         )
         
-        # 静音重置事件异步队列
+        # 静音重置事件异步队列（RNNoise 4秒静音回调用）
         self._silence_reset_pending = False
+        # 按“上次语音时间”做静音清 buffer：无 RNNoise 时也生效，与 RESET_TIMEOUT 一致
+        self._silence_buffer_clear_seconds = 4.0
+        self._last_silence_clear_speech_time = 0.0
+        # 叠加本地音量：必须连续 2 秒本地静音才允许 clear，避免 VAD 延迟导致误清
+        self._local_quiet_seconds = 2.0
+        self._last_local_loud_time = 0.0
         
         # 重复度检测
         self._recent_responses = []  # 存储最近3轮助手回复
@@ -279,6 +365,46 @@ class OmniRealtimeClient:
         """当音频处理器检测到4秒静音并重置缓存时调用。标记待发送clear事件。"""
         self._silence_reset_pending = True
     
+    def _should_clear_audio_buffer_on_silence(
+        self, current_time: float, use_rnnoise_path: bool
+    ) -> bool:
+        """是否应在静音时清空 input_audio_buffer。
+        
+        有 RNNoise 且当前走 RNNoise 路径：以 RNNoise 为准（内部 4 秒静音回调置 _silence_reset_pending）。
+        无 RNNoise（或未走 RNNoise 路径）：以 VAD + 连续本地静音为准。
+        
+        连续静音判定标准：
+        - 时长：最近 _local_quiet_seconds 秒（默认 2 秒）内无“大音量”；
+        - 大音量：原始 PCM 的 RMS > _client_vad_threshold（默认 500，int16 范围）。
+        即：每帧用原始输入算 RMS，超过阈值则更新 _last_local_loud_time；只有
+        (current_time - _last_local_loud_time) >= _local_quiet_seconds 才认为连续静音。
+        
+        返回 True 时，若来自 RNNoise 则调用方需置 _silence_reset_pending=False；
+        若来自 VAD+静音则本函数已更新 _last_silence_clear_speech_time。
+        """
+        if use_rnnoise_path:
+            # RNNoise 路径：仅以 RNNoise 的 4 秒静音回调为准；
+            # 若尚未收到回调（_silence_reset_pending=False），直接返回 False，
+            # 不得降级到 VAD 时间戳逻辑，否则会误触提前清空。
+            return self._silence_reset_pending
+        # 无 RNNoise 路径：VAD 静音 ≥ _silence_buffer_clear_seconds 且 连续本地静音 ≥ _local_quiet_seconds
+        if self._has_server_vad:
+            last_speech = self._last_speech_time
+        else:
+            last_speech = self._client_vad_last_speech_time if self._client_vad_last_speech_time > 0 else None
+        if last_speech is None:
+            return False
+        local_quiet_elapsed = current_time - self._last_local_loud_time
+        if local_quiet_elapsed < self._local_quiet_seconds:
+            return False
+        silence_elapsed = current_time - last_speech
+        if silence_elapsed < self._silence_buffer_clear_seconds:
+            return False
+        if last_speech <= self._last_silence_clear_speech_time:
+            return False
+        self._last_silence_clear_speech_time = last_speech
+        return True
+    
     async def clear_audio_buffer(self):
         """发送 input_audio_buffer.clear 事件清空服务端缓存。"""
         clear_event = {
@@ -297,6 +423,10 @@ class OmniRealtimeClient:
 
         # 确保开始新连接时状态完全重置
         self._silence_reset_pending = False
+        self._last_silence_clear_speech_time = 0.0
+        self._last_local_loud_time = 0.0
+        self._client_vad_active = False
+        self._client_vad_last_speech_time = 0.0
         if self._audio_processor is not None:
             self._audio_processor.reset()
 
@@ -354,19 +484,19 @@ class OmniRealtimeClient:
                     },
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.5,
+                        "threshold": 0.55,
                         "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500
+                        "silence_duration_ms": 650
                     },
-                    "turn_detection_threshold": 0.2,
-                    "smooth_output": False,
                     "repetition_penalty": 1.2,
-                    "temperature": 0.7
+                    "temperature": 0.7,
+                    "enable_search": True,
+                    "search_options": {'enable_source': True}
                 })
             elif "gpt" in self.model:
                 await self.update_session({
                     "type": "realtime",
-                    "model": "gpt-realtime-mini-2025-12-15",
+                    "model": self.model,
                     "instructions": instructions + '\n请使用卡哇伊的声音与用户交流。\n',
                     "output_modalities": ['audio'] if 'audio' in self._modalities else ['text'],
                     "audio": {
@@ -413,14 +543,14 @@ class OmniRealtimeClient:
                     "turn_detection": {
                         "type": "server_vad"
                     },
-                    # "tools": [
-                    #     {
-                    #         "type": "web_search",# 固定值
-                    #         "function": {
-                    #             "description": "这个web_search用来搜索互联网的信息"# 描述什么样的信息需要大模型进行搜索。
-                    #         }
-                    #     }
-                    # ]
+                    "tools": [
+                        {
+                            "type": "web_search",# 固定值
+                            "function": {
+                                "description": "这个web_search用来搜索互联网的信息"# 描述什么样的信息需要大模型进行搜索。
+                            }
+                        }
+                    ]
                 })
             else:
                 raise ValueError(f"Invalid model: {self.model}")
@@ -430,8 +560,13 @@ class OmniRealtimeClient:
     
     async def _connect_gemini(self, instructions: str, native_audio: bool = True) -> None:
         """Establish connection with Gemini Live API using google-genai SDK."""
-        if not GEMINI_AVAILABLE or genai is None:
-            raise RuntimeError("google-genai SDK not installed. Please install it with: pip install google-genai")
+        if not GEMINI_AVAILABLE or genai is None or types is None:
+            detail = f": {_GEMINI_IMPORT_ERROR}" if _GEMINI_IMPORT_ERROR else ""
+            raise RuntimeError(
+                "google-genai SDK unavailable. "
+                "If this is an SSL/证书问题, repair your system certificate chain or switch to non-Gemini API"
+                f"{detail}"
+            )
         
         try:
             # 创建 Gemini 客户端
@@ -522,7 +657,7 @@ class OmniRealtimeClient:
                         self._fatal_error_occurred = True
                         logger.error("💥 检测到致命错误 (Response timeout / 1011)，立即中断语音对话")
                         if self.on_connection_error:
-                            asyncio.create_task(self.on_connection_error("💥 连接超时 (Response timeout)，语音对话已中断。"))
+                            asyncio.create_task(self.on_connection_error(json.dumps({"code": "RESPONSE_TIMEOUT"})))
                         # 尝试关闭连接
                         asyncio.create_task(self.close())
                     return  # 不再抛出异常，直接返回
@@ -548,6 +683,14 @@ class OmniRealtimeClient:
         if self._fatal_error_occurred:
             return
         
+        current_time = time.time()
+        # 本地音量判定：用原始输入做 RMS，避免 VAD 延迟时误清 buffer
+        raw_samples = np.frombuffer(audio_chunk, dtype=np.int16)
+        if len(raw_samples) > 0:
+            local_rms = np.sqrt(np.mean(raw_samples.astype(np.float32) ** 2))
+            if local_rms > self._client_vad_threshold:
+                self._last_local_loud_time = current_time
+        
         # Detect input sample rate based on chunk size
         # 48kHz: 480 samples (10ms) = 960 bytes
         # 16kHz: 512 samples (~32ms) = 1024 bytes
@@ -555,23 +698,18 @@ class OmniRealtimeClient:
         is_48khz = (num_samples == 480)  # RNNoise frame size
         
         
+        use_rnnoise_path = is_48khz and self._audio_processor is not None
         # Apply RNNoise noise reduction only for 48kHz input (PC)
-        if is_48khz and self._audio_processor is not None:
+        if use_rnnoise_path:
             # Use async wrapper to avoid blocking main loop
             audio_chunk = await self.process_audio_chunk_async(audio_chunk)
             
             # Skip if RNNoise is buffering (returns empty)
             if len(audio_chunk) == 0:
                 return
-            
-            # 检查是否有待发送的静音重置事件（4秒静音触发）
-            if self._silence_reset_pending:
-                self._silence_reset_pending = False
-                await self.clear_audio_buffer()
         
         # Unified VAD update (priority: server VAD > RNNoise > RMS)
         # Grace period check: always runs regardless of VAD source
-        current_time = time.time()
         if self._client_vad_active and current_time - self._client_vad_last_speech_time > self._client_vad_grace_period:
             self._client_vad_active = False
         
@@ -590,6 +728,12 @@ class OmniRealtimeClient:
                     if rms > self._client_vad_threshold:
                         self._client_vad_last_speech_time = current_time
                         self._client_vad_active = True
+        
+        # 静音清 buffer：有 RNNoise 以 RNNoise 为准，否则 VAD + 连续本地静音（见 _should_clear_audio_buffer_on_silence）
+        if self._should_clear_audio_buffer_on_silence(current_time, use_rnnoise_path):
+            if use_rnnoise_path:
+                self._silence_reset_pending = False
+            await self.clear_audio_buffer()
         
         # Gemini uses different API
         if self._is_gemini:
@@ -651,7 +795,7 @@ class OmniRealtimeClient:
             error_str = str(e)
             if 'censorship' in error_str:
                 if self.on_status_message:
-                    await self.on_status_message("⚠️ 图片内容被审查系统拦截，请尝试更换图片或内容。")
+                    await self.on_status_message(json.dumps({"code": "IMAGE_BLOCKED"}))
             return "图片识别发生严重错误！"
     
     async def stream_image(self, image_b64: str) -> None:
@@ -945,41 +1089,46 @@ class OmniRealtimeClient:
                         self._throttle_until = time.time() + self._throttle_duration
                         logger.warning(f"⚡ 503 detected, throttling for {self._throttle_duration}s")
                         if self.on_status_message:
-                            await self.on_status_message("⚠️ 服务器繁忙，正在自动调节发送速率...")
-                        continue  # 不关闭连接，只进行节流
+                            await self.on_status_message(json.dumps({"code": "SERVER_BUSY_THROTTLE"}))
+                        continue
                     
-                    if '欠费' in error_msg or 'standing' in error_msg:
-                        error_msg = str(event.get('error', ''))
-                        logger.error(f"API Error: {error_msg}")
-                    
-                    # 检测503过载错误，触发backpressure节流
-                    if '503' in error_msg or 'overloaded' in error_msg.lower():
-                        self._is_throttled = True
-                        self._throttle_until = time.time() + self._throttle_duration
-                        logger.warning(f"⚡ 503 detected, throttling for {self._throttle_duration}s")
-                        if self.on_status_message:
-                            await self.on_status_message("⚠️ 服务器繁忙，正在自动调节发送速率...")
-                        continue  # 不关闭连接，只进行节流
-                    
-                    if '欠费' in error_msg or 'standing' in error_msg:
+                    error_msg_lower = error_msg.lower()
+                    if ('欠费' in error_msg or 'standing' in error_msg_lower or 'time limit' in error_msg_lower or
+                        'policy violation' in error_msg_lower or '1008' in error_msg_lower or
+                        '429' in error_msg_lower or 'quota' in error_msg_lower or 'too many' in error_msg_lower):
                         if self.on_connection_error:
-                            await self.on_connection_error(error_msg)
                             await self.on_connection_error(error_msg)
                         await self.close()
                     continue
                 elif event_type == "response.done":
+                    # 解析实时 API 返回的 token 用量
+                    try:
+                        resp_data = event.get("response", {})
+                        _rt_usage = resp_data.get("usage")
+                        if _rt_usage:
+                            from utils.token_tracker import TokenTracker
+                            TokenTracker.get_instance().record(
+                                model=resp_data.get("model", self.model or "realtime"),
+                                prompt_tokens=_rt_usage.get("input_tokens", 0),
+                                completion_tokens=_rt_usage.get("output_tokens", 0),
+                                total_tokens=_rt_usage.get("total_tokens", 0),
+                                call_type="conversation_realtime",
+                                source="main_logic/omni_realtime_client",
+                            )
+                    except Exception:
+                        pass
                     self._is_responding = False
                     self._current_response_id = None
                     self._current_item_id = None
                     self._skip_until_next_response = False
                     # 响应完成，检测重复度
                     if self._current_response_transcript:
-                        # 不使用logger.info，避免日志文件泄露实际对话内容
-                        print(f"OmniRealtimeClient: response.done - 当前转录: '{self._current_response_transcript[:50]}...'")
+                        print(f"OmniRealtimeClient: response.done - 当前转录: '{self._current_response_transcript[:50]}...' | audio_deltas={self._audio_delta_count}")
                         await self._check_repetition(self._current_response_transcript)
                         self._current_response_transcript = ""
                     else:
-                        print("OmniRealtimeClient: response.done - 没有转录文本")
+                        print(f"OmniRealtimeClient: response.done - 没有转录文本 | audio_deltas={self._audio_delta_count}")
+                    self._audio_delta_count = 0
                     # 确保 buffer 被清空
                     self._output_transcript_buffer = ""
                     self._image_recognized_this_turn = False
@@ -1019,6 +1168,9 @@ class OmniRealtimeClient:
                     self._print_input_transcript = True
                 elif event_type in ["response.audio_transcript.done", "response.output_audio_transcript.done"]:
                     self._print_input_transcript = False
+                    if self._output_transcript_buffer and self.on_output_transcript and not self._skip_until_next_response and not self._interrupted:
+                        await self.on_output_transcript(self._output_transcript_buffer, self._is_first_transcript_chunk)
+                        self._is_first_transcript_chunk = False
                     self._output_transcript_buffer = ""
 
                 if not self._skip_until_next_response and not self._interrupted:
@@ -1028,6 +1180,9 @@ class OmniRealtimeClient:
                                 await self.on_text_delta(event["delta"], self._is_first_text_chunk)
                                 self._is_first_text_chunk = False
                     elif event_type in ["response.audio.delta", "response.output_audio.delta"]:
+                        self._audio_delta_count += 1
+                        if self._audio_delta_count == 1:
+                            logger.info(f"🔊 首个 audio.delta 已收到 (type={event_type}, bytes={len(event.get('delta',''))})")
                         if self.on_audio_delta:
                             audio_bytes = base64.b64decode(event["delta"])
                             await self.on_audio_delta(audio_bytes)
@@ -1071,7 +1226,7 @@ class OmniRealtimeClient:
             if self.ws:
                 await self.ws.close()
             if self.on_connection_error:
-                await self.on_connection_error("💥 连接超时，请检查网络连接。")
+                await self.on_connection_error(json.dumps({"code": "CONNECTION_TIMEOUT"}))
         except Exception as e:
             logger.error(f"Error in message handling: {str(e)}")
             raise e
@@ -1094,6 +1249,10 @@ class OmniRealtimeClient:
         self._silence_timeout_triggered = False
         self._last_speech_time = None
         self._silence_reset_pending = False
+        self._last_silence_clear_speech_time = 0.0
+        self._last_local_loud_time = 0.0
+        self._client_vad_active = False
+        self._client_vad_last_speech_time = 0.0
 
         # 保存 debug 音频（RNNoise 处理前后的对比音频）
         if self._audio_processor is not None:
@@ -1139,6 +1298,10 @@ class OmniRealtimeClient:
                 self._silence_timeout_triggered = False
                 self._last_speech_time = None
                 self._silence_reset_pending = False
+                self._last_silence_clear_speech_time = 0.0
+                self._last_local_loud_time = 0.0
+                self._client_vad_active = False
+                self._client_vad_last_speech_time = 0.0
 
                 # 重置音频处理器状态
                 if self._audio_processor is not None:
@@ -1159,6 +1322,10 @@ class OmniRealtimeClient:
                     turn = self._gemini_session.receive()
                     async for response in turn:
                         await self._process_gemini_response(response)
+                    # receive() 是 session 级 async generator，仅在连接断开时退出；
+                    # 正常会话期间此行不会执行。缺失 turn_complete 的兜底已移至
+                    # _process_gemini_response 中基于 model_turn 时间间隔的检测。
+                    self._is_responding = False
                 except asyncio.CancelledError:
                     logger.info("Gemini message handler cancelled")
                     break
@@ -1213,12 +1380,13 @@ class OmniRealtimeClient:
                         await self.on_new_message()
                 
                 # 处理输出转录 - 流式发送每个 chunk 到前端
+                # 不参与新 turn 检测；turn_complete 后到达的迟到转录会以 isNewMessage=false
+                # 追加到当前轮次的气泡（正确行为）
                 if hasattr(server_content, 'output_transcription') and server_content.output_transcription:
                     output_trans = server_content.output_transcription
                     if hasattr(output_trans, 'text') and output_trans.text:
                         text = output_trans.text
                         self._gemini_current_transcript += text
-                        # 流式发送到前端（第一个 chunk 标记 is_first=True）
                         if self.on_text_delta:
                             await self.on_text_delta(text, self._is_first_text_chunk)
                             self._is_first_text_chunk = False
@@ -1236,8 +1404,19 @@ class OmniRealtimeClient:
                                 if self.on_audio_delta:
                                     await self.on_audio_delta(part.inline_data.data)
                 
-                # 检查是否 turn 完成
-                if server_content.turn_complete:
+                # 检查是否 turn 完成（用 getattr 防止 SDK 无该字段时抛错）
+                if getattr(server_content, 'turn_complete', False):
+                    # Gemini Live API 不返回 token 数，仅记录调用次数
+                    try:
+                        from utils.token_tracker import TokenTracker
+                        TokenTracker.get_instance().record(
+                            model=self.model or "gemini-live",
+                            prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                            call_type="conversation_realtime_gemini",
+                            source="main_logic/omni_realtime_client",
+                        )
+                    except Exception:
+                        pass
                     self._is_responding = False
                     # 不再调用 on_output_transcript（已通过 on_text_delta 流式发送）
                     if self.on_response_done:

@@ -5,7 +5,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Windows multiprocessing 支持：确保子进程不会重复执行模块级初始化
 from multiprocessing import freeze_support
+import multiprocessing
+from utils.port_utils import set_port_probe_reuse
 freeze_support()
+
+# 设置 multiprocessing 启动方法（确保跨进程共享结构的一致性）
+# 在 Linux/macOS 上使用 fork，在 Windows 上使用 spawn（默认）
+if sys.platform != "win32":
+    try:
+        multiprocessing.set_start_method('fork', force=False)
+    except RuntimeError:
+        # 启动方法已经设置过，忽略
+        pass
 
 # 检查是否需要执行初始化（用于防止 Windows spawn 方式创建的子进程重复初始化）
 # 方案：首次导入时设置环境变量标记，子进程会继承这个标记从而跳过初始化
@@ -34,24 +45,50 @@ import mimetypes # noqa
 mimetypes.add_type("application/javascript", ".js")
 import asyncio # noqa
 import logging # noqa
-from fastapi import FastAPI # noqa
-from fastapi.staticfiles import StaticFiles # noqa
-from main_logic import core as core, cross_server as cross_server # noqa
-from main_logic.agent_event_bus import MainServerAgentBridge, notify_analyze_ack, set_main_bridge # noqa
-from fastapi.templating import Jinja2Templates # noqa
-from threading import Thread, Event as ThreadEvent # noqa
-from queue import Queue # noqa
 import atexit # noqa
 import httpx # noqa
 from config import MAIN_SERVER_PORT, MONITOR_SERVER_PORT # noqa
-from utils.config_manager import get_config_manager # noqa
+from utils.config_manager import get_config_manager, get_reserved # noqa
+# 将日志初始化提前，确保导入阶段异常也能落盘
+from utils.logger_config import setup_logging # noqa: E402
+from utils.ssl_env_diagnostics import probe_ssl_environment, write_ssl_diagnostic # noqa: E402
+
+logger, log_config = setup_logging(service_name="Main", log_level=logging.INFO, silent=not _IS_MAIN_PROCESS)
+
+if _IS_MAIN_PROCESS:
+    _ssl_precheck = probe_ssl_environment()
+    if not _ssl_precheck.get("ok", True):
+        diag_dir = os.path.join(log_config.get_log_directory_path(), "diagnostics")
+        diag_path = write_ssl_diagnostic(
+            event="main_server_ssl_precheck_failed",
+            output_dir=diag_dir,
+            extra=_ssl_precheck,
+        )
+        logger.warning(
+            "SSL environment precheck failed: %s%s",
+            _ssl_precheck.get("error_message"),
+            f" | diagnostic: {diag_path}" if diag_path else "",
+        )
+
+try:
+    from fastapi import FastAPI # noqa
+    from fastapi.staticfiles import StaticFiles # noqa
+    from main_logic import core as core, cross_server as cross_server # noqa
+    from main_logic.agent_event_bus import MainServerAgentBridge, notify_analyze_ack, set_main_bridge # noqa
+    from fastapi.templating import Jinja2Templates # noqa
+    from threading import Thread, Event as ThreadEvent # noqa
+    from queue import Queue # noqa
+except Exception as e:
+    logger.exception(f"[Main] Module import failed during startup: {e}")
+    raise
+
 # 导入创意工坊工具模块
 from utils.workshop_utils import ( # noqa
     get_workshop_root,
     get_workshop_path
 )
 # 导入创意工坊路由中的函数
-from main_routers.workshop_router import get_subscribed_workshop_items # noqa
+from main_routers.workshop_router import get_subscribed_workshop_items, sync_workshop_character_cards, warmup_ugc_cache # noqa
 
 # 确定 templates 目录位置（使用 _get_app_root）
 template_dir = _get_app_root()
@@ -120,11 +157,7 @@ def get_default_steam_info():
 # Steamworks 初始化将在 @app.on_event("startup") 中延迟执行
 # 这样可以避免在模块导入时就执行 DLL 加载等操作
 steamworks = None
-
-# 配置日志（子进程静默初始化，避免重复打印初始化消息）
-from utils.logger_config import setup_logging # noqa: E402
-
-logger, log_config = setup_logging(service_name="Main", log_level=logging.INFO, silent=not _IS_MAIN_PROCESS)
+_server_loop: asyncio.AbstractEventLoop | None = None
 
 _config_manager = get_config_manager()
 
@@ -155,12 +188,54 @@ master_basic_config = None
 lanlan_basic_config = None
 name_mapping = None
 lanlan_prompt = None
-semantic_store = None
 time_store = None
 setting_store = None
 recent_log = None
 catgirl_names = []
 agent_event_bridge: MainServerAgentBridge | None = None
+
+
+def _is_websocket_connected(ws) -> bool:
+    """Check if a WebSocket is in CONNECTED state."""
+    if not ws:
+        return False
+    if not hasattr(ws, "client_state"):
+        return False
+    try:
+        return ws.client_state == ws.client_state.CONNECTED
+    except Exception:
+        return False
+
+
+def _select_fallback_session_manager():
+    """Return a single connected session manager as a safe fallback, if unambiguous."""
+    connected = []
+    for name, mgr in session_manager.items():
+        if not mgr:
+            continue
+        ws = getattr(mgr, "websocket", None)
+        if _is_websocket_connected(ws):
+            connected.append((name, mgr))
+    if len(connected) == 1:
+        return connected[0]
+    return None, None
+
+
+async def _broadcast_to_all_connected(event_payload: dict) -> int:
+    """Broadcast an event to all connected WebSocket sessions asynchronously."""
+    delivered_count = 0
+    # Take a snapshot to avoid RuntimeError from concurrent dict mutation
+    for name, mgr in list(session_manager.items()):
+        if not mgr:
+            continue
+        ws = getattr(mgr, "websocket", None)
+        if _is_websocket_connected(ws) and hasattr(ws, "send_json"):
+            try:
+                await ws.send_json(event_payload)
+                delivered_count += 1
+            except Exception as e:
+                logger.debug("[EventBus] broadcast to %s failed: %s", name, e)
+    return delivered_count
 
 
 async def _handle_agent_event(event: dict):
@@ -186,28 +261,103 @@ async def _handle_agent_event(event: dict):
             }
             if lanlan and lanlan in session_manager:
                 mgr = session_manager.get(lanlan)
-                if mgr and mgr.websocket and hasattr(mgr.websocket, "send_json"):
+                ws = getattr(mgr, "websocket", None) if mgr else None
+                if _is_websocket_connected(ws):
                     try:
-                        await mgr.websocket.send_json(payload)
-                    except Exception:
-                        pass
+                        await ws.send_json(payload)
+                    except Exception as e:
+                        logger.debug("[EventBus] agent_status_update send failed: %s", e)
             else:
-                for mgr in session_manager.values():
-                    if mgr and mgr.websocket and hasattr(mgr.websocket, "send_json"):
-                        try:
-                            await mgr.websocket.send_json(payload)
-                        except Exception:
-                            pass
+                await _broadcast_to_all_connected(payload)
             return
 
-        if not lanlan or lanlan not in session_manager:
+        # Resolve target session manager; fallback to broadcast if lanlan is unknown
+        mgr = session_manager.get(lanlan) if lanlan else None
+        if not mgr and event_type == "task_update":
+            # Broadcast task_update to all connected sessions when lanlan is unresolvable
+            task_payload = {"type": "agent_task_update", "task": event.get("task", {})}
+            delivered = await _broadcast_to_all_connected(task_payload)
+            if delivered == 0:
+                logger.warning("[EventBus] task_update broadcast: no connected WebSocket sessions")
             return
-        mgr = session_manager.get(lanlan)
+
+        # --- Music Global Broadcasts (Must come before early 'if not mgr' returns) ---
+        elif event_type == "music_allowlist_add":
+            # Music allowlist is a global UI state, broadcast to all active sessions
+            targets = [mgr] if mgr else list(session_manager.values())
+            for target_mgr in targets:
+                if target_mgr and target_mgr.websocket and hasattr(target_mgr.websocket, "send_json"):
+                    try:
+                        await target_mgr.websocket.send_json({
+                            "type": "music_allowlist_add",
+                            "domains": event.get("domains") or event.get("metadata", {}).get("domains", [])
+                        })
+                    except Exception as e:
+                        logger.debug("[EventBus] music_allowlist_add broadcast failed: %s", e)
+            if targets:
+                logger.info("[EventBus] music_allowlist_add broadcasted to %d sessions", len(targets))
+            return
+
+        elif event_type == "music_play_url":
+            # Music playback is a global UI action, broadcast to all active sessions
+            targets = [mgr] if mgr else list(session_manager.values())
+            for target_mgr in targets:
+                if target_mgr and target_mgr.websocket and hasattr(target_mgr.websocket, "send_json"):
+                    try:
+                        await target_mgr.websocket.send_json({
+                            "type": "music_play_url",
+                            "url": event.get("url"),
+                            "name": event.get("name") or "Plugin Music",
+                            "artist": event.get("artist") or "External"
+                        })
+                    except Exception as e:
+                        logger.debug("[EventBus] music_play_url broadcast failed: %s", e)
+            if targets:
+                logger.info("[EventBus] music_play_url broadcasted to %d sessions", len(targets))
+            return
+        if not mgr and event_type in ("proactive_message", "task_result"):
+            fallback_name, fallback_mgr = _select_fallback_session_manager()
+            if fallback_mgr is not None:
+                mgr = fallback_mgr
+                logger.warning(
+                    "[EventBus] %s rerouted: lanlan=%s missing, fallback_session=%s",
+                    event_type,
+                    lanlan,
+                    fallback_name,
+                )
+            else:
+                # No target session found — drop the event entirely.
+                # Do NOT broadcast text to other sessions to prevent cross-session leaks.
+                logger.info(
+                    "[EventBus] %s dropped: no target session for lanlan=%s, active_sessions=%s",
+                    event_type,
+                    lanlan,
+                    list(session_manager.keys()),
+                )
+                return
         if not mgr:
+            logger.info("[EventBus] %s dropped: no session_manager for lanlan=%s", event_type, lanlan)
             return
         if event_type in ("task_result", "proactive_message"):
             text = (event.get("text") or "").strip()
             if text:
+                if event.get("direct_reply"):
+                    detail_text = (event.get("detail") or text).strip()
+                    delivered = False
+                    if detail_text and hasattr(mgr, "send_lanlan_response"):
+                        try:
+                            delivered = bool(await mgr.send_lanlan_response(detail_text, True))
+                        except Exception as e:
+                            logger.warning("[EventBus] direct task_result reply failed: %s", e)
+                    if delivered and hasattr(mgr, "handle_proactive_complete"):
+                        try:
+                            await mgr.handle_proactive_complete()
+                        except Exception as e:
+                            logger.warning("[EventBus] direct task_result turn_end failed: %s", e)
+                    if delivered:
+                        logger.info("[EventBus] direct task_result reply delivered: %.60s", detail_text[:60])
+                        return
+
                 # Build structured callback and enqueue for LLM injection
                 cb_status = event.get("status") or ("completed" if event.get("success", True) else "failed")
                 callback = {
@@ -222,40 +372,84 @@ async def _handle_agent_event(event: dict):
                     "timestamp": event.get("timestamp") or "",
                 }
                 mgr.enqueue_agent_callback(callback)
-                # Attempt immediate delivery; re-queued automatically if session is busy
-                mgr._pending_agent_callback_task = asyncio.create_task(mgr.trigger_agent_callbacks())
-                if mgr.websocket and hasattr(mgr.websocket, "send_json"):
+                logger.info("[EventBus] %s enqueued callback, scheduling trigger_agent_callbacks", event_type)
+
+                # Create task with exception logging
+                async def _run_trigger_with_logging():
                     try:
-                        await mgr.websocket.send_json({
+                        await mgr.trigger_agent_callbacks()
+                    except Exception as e:
+                        logger.error("[EventBus] trigger_agent_callbacks task failed: %s", e)
+                mgr._pending_agent_callback_task = asyncio.create_task(_run_trigger_with_logging())
+                ws = getattr(mgr, "websocket", None)
+                if _is_websocket_connected(ws):
+                    try:
+                        notif = {
                             "type": "agent_notification",
                             "text": text,
                             "source": "brain",
                             "status": cb_status,
-                        })
-                    except Exception:
-                        pass
-        elif event_type == "task_update":
-            if mgr.websocket and hasattr(mgr.websocket, "send_json"):
+                        }
+                        err_msg = event.get("error_message") or ""
+                        if err_msg:
+                            notif["error_message"] = err_msg[:500]
+                        await ws.send_json(notif)
+                        logger.info("[EventBus] agent_notification sent to frontend: %.60s", text[:60])
+                    except Exception as e:
+                        logger.warning("[EventBus] agent_notification WS send failed: %s", e)
+                else:
+                    logger.warning("[EventBus] agent_notification: WebSocket not connected for lanlan=%s", lanlan)
+        elif event_type == "agent_notification":
+            ws = getattr(mgr, "websocket", None)
+            if _is_websocket_connected(ws):
                 try:
-                    await mgr.websocket.send_json({"type": "agent_task_update", "task": event.get("task", {})})
-                except Exception:
-                    pass
+                    notif = {
+                        "type": "agent_notification",
+                        "text": event.get("text", ""),
+                        "source": event.get("source", "brain"),
+                        "status": event.get("status", "error"),
+                    }
+                    err_msg = event.get("error_message") or ""
+                    if err_msg:
+                        notif["error_message"] = err_msg[:500]
+                    await ws.send_json(notif)
+                except Exception as e:
+                    logger.debug("[EventBus] agent_notification send failed: %s", e)
+            else:
+                logger.debug("[EventBus] agent_notification: WebSocket not connected for lanlan=%s", lanlan)
+        elif event_type == "task_update":
+            task_payload = {"type": "agent_task_update", "task": event.get("task", {})}
+            ws = getattr(mgr, "websocket", None)
+            if _is_websocket_connected(ws):
+                try:
+                    await ws.send_json(task_payload)
+                except Exception as e:
+                    logger.warning("[EventBus] task_update send failed for lanlan=%s: %s", lanlan, e)
+            else:
+                logger.warning("[EventBus] task_update dropped: WebSocket not connected for lanlan=%s", lanlan)
     except Exception as e:
         logger.debug(f"handle_agent_event error: {e}")
 
 async def initialize_character_data():
     """初始化或重新加载角色配置数据"""
     global master_name, her_name, master_basic_config, lanlan_basic_config
-    global name_mapping, lanlan_prompt, semantic_store, time_store, setting_store, recent_log
+    global name_mapping, lanlan_prompt, time_store, setting_store, recent_log
     global catgirl_names, sync_message_queue, sync_shutdown_event, session_manager, session_id, sync_process, websocket_locks
     
     logger.info("正在加载角色配置...")
     
-    # 清理无效的voice_id引用
-    _config_manager.cleanup_invalid_voice_ids()
+    # 清理无效的voice_id引用；如果发现旧版 CosyVoice 音色，推入通知缓冲池等前端连接后弹出
+    _cleaned, _legacy_names = _config_manager.cleanup_invalid_voice_ids()
+    if _legacy_names:
+        core.enqueue_prominent_notice({
+            "code": "notice.voiceMigration.legacyRemoved",
+            "message": "CosyVoice 现已升级至 3.5，您的旧语音已失效，请重新克隆语音。",
+            "message_en": "CosyVoice has been upgraded to 3.5. Your old voices are no longer valid — please re-clone your voices.",
+            "details": {"voices": _legacy_names},
+        })
     
     # 加载最新的角色数据
-    master_name, her_name, master_basic_config, lanlan_basic_config, name_mapping, lanlan_prompt, semantic_store, time_store, setting_store, recent_log = _config_manager.get_character_data()
+    master_name, her_name, master_basic_config, lanlan_basic_config, name_mapping, lanlan_prompt, time_store, setting_store, recent_log = _config_manager.get_character_data()
     catgirl_names = list(lanlan_prompt.keys())
     
     # 为新增的角色初始化资源
@@ -308,11 +502,15 @@ async def initialize_character_data():
                         _,
                         _,
                         _,
-                        _,
                         _
                     ) = _config_manager.get_character_data()
                     # 更新voice_id（这是切换音色时需要的）
-                    old_mgr.voice_id = lanlan_basic_config_updated[k].get('voice_id', '')
+                    old_mgr.voice_id = get_reserved(
+                        lanlan_basic_config_updated[k],
+                        'voice_id',
+                        default='',
+                        legacy_keys=('voice_id',),
+                    )
                     logger.info(f"{k} 有活跃session，只更新配置，不重新创建session_manager")
                 except Exception as e:
                     logger.error(f"更新 {k} 的活跃session配置失败: {e}", exc_info=True)
@@ -356,9 +554,26 @@ async def initialize_character_data():
         
         if need_start_thread:
             try:
+                _char_name = k
+                def _make_status_cb(char_name):
+                    def _cb(msg):
+                        mgr = session_manager.get(char_name)
+                        if not mgr:
+                            return
+                        loop = _server_loop
+                        if loop is None or loop.is_closed():
+                            return
+                        ws = mgr.websocket
+                        if ws and hasattr(ws, 'client_state') and ws.client_state == ws.client_state.CONNECTED:
+                            import json as _json
+                            data = _json.dumps({"type": "status", "message": msg})
+                            asyncio.run_coroutine_threadsafe(ws.send_text(data), loop)
+                    return _cb
+                _status_cb = _make_status_cb(_char_name)
+
                 sync_process[k] = Thread(
                     target=cross_server.sync_connector_process,
-                    args=(sync_message_queue[k], sync_shutdown_event[k], k, f"ws://127.0.0.1:{MONITOR_SERVER_PORT}", {'bullet': False, 'monitor': True}),
+                    args=(sync_message_queue[k], sync_shutdown_event[k], k, f"ws://127.0.0.1:{MONITOR_SERVER_PORT}", {'bullet': False, 'monitor': True}, _status_cb),
                     daemon=True,
                     name=f"SyncConnector-{k}"
                 )
@@ -444,11 +659,25 @@ app.mount("/static", CustomStaticFiles(directory=static_dir), name="static")
 if _IS_MAIN_PROCESS:
     _config_manager.ensure_live2d_directory()
     _config_manager.ensure_vrm_directory()
+    _config_manager.ensure_mmd_directory()
     _config_manager.ensure_chara_directory()
-    user_live2d_path = str(_config_manager.live2d_dir)
-    if os.path.exists(user_live2d_path):
-        app.mount("/user_live2d", CustomStaticFiles(directory=user_live2d_path), name="user_live2d")
-        logger.info(f"已挂载用户Live2D目录: {user_live2d_path}")
+
+    # CFA (反勒索防护) 感知挂载：
+    # 优先从原始 Documents 目录（可读）提供模型文件，
+    # 可写回退目录（AppData）作为辅助挂载供新导入的模型使用
+    _readable_live2d = _config_manager.readable_live2d_dir
+    _serve_live2d_path = str(_readable_live2d) if _readable_live2d else str(_config_manager.live2d_dir)
+
+    if os.path.exists(_serve_live2d_path):
+        app.mount("/user_live2d", CustomStaticFiles(directory=_serve_live2d_path), name="user_live2d")
+        logger.info(f"已挂载用户Live2D目录: {_serve_live2d_path}")
+
+    # CFA 场景：可写回退目录额外挂载，供新导入的模型使用
+    if _readable_live2d and str(_config_manager.live2d_dir) != _serve_live2d_path:
+        _writable_live2d_path = str(_config_manager.live2d_dir)
+        if os.path.exists(_writable_live2d_path):
+            app.mount("/user_live2d_local", CustomStaticFiles(directory=_writable_live2d_path), name="user_live2d_local")
+            logger.info(f"已挂载本地Live2D目录(CFA回退): {_writable_live2d_path}")
 
     # 挂载VRM动画目录（static/vrm/animation） 必须第一个挂载
     vrm_animation_path = str(_config_manager.vrm_animation_dir)
@@ -467,6 +696,22 @@ if _IS_MAIN_PROCESS:
     if os.path.exists(project_vrm_path) and os.path.isdir(project_vrm_path):
         logger.info(f"项目VRM目录存在: {project_vrm_path} (可通过 /static/vrm/ 访问)")
     
+    # 挂载MMD动画目录（必须在MMD模型目录之前挂载）
+    mmd_animation_path = str(_config_manager.mmd_animation_dir)
+    if os.path.exists(mmd_animation_path):
+        app.mount("/user_mmd/animation", CustomStaticFiles(directory=mmd_animation_path), name="user_mmd_animation")
+        logger.info(f"已挂载MMD动画目录: {mmd_animation_path}")
+
+    # 挂载MMD模型目录（用户文档目录）
+    user_mmd_path = str(_config_manager.mmd_dir)
+    if os.path.exists(user_mmd_path):
+        app.mount("/user_mmd", CustomStaticFiles(directory=user_mmd_path), name="user_mmd")
+        logger.info(f"已挂载MMD目录: {user_mmd_path}")
+    
+    # 挂载项目目录下的static/mmd（作为备用）
+    project_mmd_path = os.path.join(static_dir, 'mmd')
+    if os.path.exists(project_mmd_path) and os.path.isdir(project_mmd_path):
+        logger.info(f"项目MMD目录存在: {project_mmd_path} (可通过 /static/mmd/ 访问)")
 
     # 挂载用户mod路径
     user_mod_path = _config_manager.get_workshop_path()
@@ -481,6 +726,7 @@ from main_routers import ( # noqa
     characters_router,
     live2d_router,
     vrm_router,
+    mmd_router,
     workshop_router,
     memory_router,
     pages_router,
@@ -488,7 +734,8 @@ from main_routers import ( # noqa
     agent_router,
     system_router,
 )
-from main_routers.cookies_login_router import router as cookies_login_router
+from main_routers import music_router # noqa
+from main_routers.cookies_login_router import router as cookies_login_router # noqa
 from main_routers.shared_state import init_shared_state # noqa
 
 # 初始化共享状态，供各路由访问
@@ -540,12 +787,14 @@ app.include_router(config_router)
 app.include_router(characters_router)
 app.include_router(live2d_router)
 app.include_router(vrm_router)
+app.include_router(mmd_router)
 app.include_router(workshop_router)
 app.include_router(memory_router)
 # 注意：pages_router 含 /{lanlan_name} 兜底路由，应最后挂载
 app.include_router(websocket_router)
 app.include_router(agent_router)
 app.include_router(system_router)
+app.include_router(music_router.router)
 app.include_router(cookies_login_router) # Cookies登录相关路由，放在最后以避免与其他API路由冲突
 app.include_router(pages_router)  # 兜底路由需最后挂载
 
@@ -658,7 +907,7 @@ def _sync_preload_modules():
         import asyncio
         
         async def _warmup_httpx():
-            async with httpx.AsyncClient(timeout=1.0) as client:
+            async with httpx.AsyncClient(timeout=1.0, proxy=None, trust_env=False) as client:
                 # 发送一个简单请求预热 SSL 上下文
                 try:
                     await client.get("http://127.0.0.1:1", timeout=0.01)
@@ -690,7 +939,8 @@ def _sync_preload_modules():
 async def on_startup():
     """服务器启动时执行的初始化操作"""
     if _IS_MAIN_PROCESS:
-        global steamworks, _preload_task, agent_event_bridge
+        global steamworks, _preload_task, agent_event_bridge, _server_loop
+        _server_loop = asyncio.get_running_loop()
         logger.info("正在初始化 Steamworks...")
         steamworks = initialize_steamworks()
         
@@ -712,6 +962,51 @@ async def on_startup():
         except Exception as e:
             logger.warning(f"Agent event bridge startup failed: {e}")
         await _init_and_mount_workshop()
+        
+        # 后台预热 UGC 缓存 + 同步角色卡（分别独立任务，互不阻塞）
+        if steamworks:
+            import main_routers.workshop_router as _wr
+            
+            async def _warmup_only():
+                """仅预热 UGC 缓存"""
+                try:
+                    await warmup_ugc_cache()
+                except Exception as e:
+                    logger.warning(f"UGC 缓存预热失败: {e}")
+            
+            async def _sync_characters_only():
+                """等待预热完成后同步角色卡"""
+                # 先等预热完成，角色卡同步依赖订阅物品列表
+                if _wr._ugc_warmup_task is not None:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(_wr._ugc_warmup_task), timeout=20)
+                    except asyncio.TimeoutError:
+                        logger.warning("等待 UGC 预热任务超时（20s），继续角色卡同步")
+                    except Exception as e:
+                        logger.debug(f"等待 UGC 预热任务时异常（不影响角色卡同步）: {e}")
+                try:
+                    sync_result = await sync_workshop_character_cards()
+                    if sync_result["added"] > 0:
+                        logger.info(f"✅ 创意工坊角色卡同步完成：新增 {sync_result['added']} 个，跳过 {sync_result['skipped']} 个")
+                    else:
+                        logger.info("创意工坊角色卡同步完成：无新增角色卡")
+                except Exception as e:
+                    logger.warning(f"创意工坊角色卡同步失败（不影响启动）: {e}")
+            
+            # _ugc_warmup_task 仅引用预热任务，等待它不会被角色卡同步阻塞
+            _wr._ugc_warmup_task = asyncio.create_task(_warmup_only())
+            _wr._ugc_sync_task = asyncio.create_task(_sync_characters_only())
+        
+        # 初始化全局 LLM Token 用量追踪器
+        try:
+            from utils.token_tracker import TokenTracker, install_hooks
+            install_hooks()
+            TokenTracker.get_instance().start_periodic_save()
+            TokenTracker.get_instance().record_app_start()
+            logger.info("Token usage tracker initialized")
+        except Exception as e:
+            logger.warning(f"Token tracker initialization failed (non-critical): {e}")
+
         logger.info("Startup 初始化完成，后台正在预加载音频模块...")
 
         # 初始化全局语言变量（优先级：Steam设置 > 系统设置）
@@ -721,6 +1016,74 @@ async def on_startup():
             logger.info(f"全局语言初始化完成: {global_lang}")
         except Exception as e:
             logger.warning(f"全局语言初始化失败: {e}，将使用默认值")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    """服务器关闭时清理资源"""
+    if _IS_MAIN_PROCESS:
+        logger.info("正在清理资源...")
+        
+        # 等待预加载任务完成（如果还在运行）
+        global _preload_task, agent_event_bridge
+        if _preload_task:
+            try:
+                await asyncio.wait_for(_preload_task, timeout=1.0)
+            except asyncio.TimeoutError:
+                _preload_task.cancel()
+                try:
+                    await _preload_task
+                except asyncio.CancelledError:
+                    logger.debug("预加载任务清理时超时并已取消（正常关闭流程）")
+            except asyncio.CancelledError:
+                logger.debug("预加载任务清理时已取消（正常关闭流程）")
+            except Exception as e:
+                logger.debug(f"预加载任务清理时出错（正常关闭流程）: {e}", exc_info=True)
+        
+        # Clean up agent_event_bridge (ZMQ context/sockets/recv thread)
+        if agent_event_bridge is not None:
+            try:
+                await agent_event_bridge.stop()
+            except Exception as e:
+                logger.debug(f"Agent event bridge cleanup failed: {e}", exc_info=True)
+        
+        # 释放 soxr ResampleStream（nanobind C 扩展），避免解释器退出时泄漏警告
+        try:
+            for mgr in session_manager.values():
+                if hasattr(mgr, 'audio_resampler'):
+                    mgr.audio_resampler = None
+        except Exception as e:
+            logger.debug(f"soxr resampler cleanup failed: {e}")
+
+        # 关闭翻译服务
+        try:
+            from utils import language_utils
+            close_fn = getattr(language_utils, "aclose_translation_service", None)
+            if callable(close_fn):
+                await close_fn()
+            else:
+                logger.debug("Translation service cleanup skipped: function not implemented")
+        except Exception as e:
+            logger.debug(f"Translation service cleanup failed: {e}")
+
+        # 保存 Token 用量数据
+        try:
+            from utils.token_tracker import TokenTracker
+            TokenTracker.get_instance().save()
+        except Exception as e:
+            logger.debug(f"Token usage save on shutdown failed: {e}")
+
+        # 关闭音乐爬虫连接池
+        try:
+            from utils.music_crawlers import close_all_crawlers
+            # 【核心修改】增加 1 秒超时兜底。如果 1 秒内关不完，直接抛弃，保障服务器顺利退出
+            await asyncio.wait_for(close_all_crawlers(), timeout=1.0)
+            
+        except asyncio.TimeoutError:
+            # 单独捕获超时异常，记录警告但放行
+            logger.warning("音乐爬虫连接池清理超时，已强制跳过以保证服务正常退出。")
+        except Exception as e:
+            logger.debug(f"音乐爬虫清理失败: {e}", exc_info=True)
 
 # 使用 FastAPI 的 app.state 来管理启动配置
 def get_start_config():
@@ -787,12 +1150,31 @@ async def shutdown_server_async():
         # 短暂延时，确保 beacon 响应有机会先发送
         await asyncio.sleep(0.5)
         logger.info("正在关闭服务器...")
+
+        # 取消后台创意工坊任务，避免残留协程
+        try:
+            import main_routers.workshop_router as _wr
+            _SHUTDOWN_TASK_TIMEOUT = 5  # 等待后台任务结束的超时秒数
+            for task_attr in ('_ugc_warmup_task', '_ugc_sync_task'):
+                task = getattr(_wr, task_attr, None)
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await asyncio.wait_for(task, timeout=_SHUTDOWN_TASK_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"后台任务 {task_attr} 在 {_SHUTDOWN_TASK_TIMEOUT}s 内未结束，跳过等待")
+                    except asyncio.CancelledError:
+                        logger.debug(f"后台任务 {task_attr} 已取消")
+                    except Exception as e:
+                        logger.debug(f"后台任务 {task_attr} 取消时异常: {e}")
+        except Exception as e:
+            logger.debug(f"取消创意工坊后台任务时出错: {e}")
         
         # 向memory_server发送关闭信号
         try:
             from config import MEMORY_SERVER_PORT
             shutdown_url = f"http://127.0.0.1:{MEMORY_SERVER_PORT}/shutdown"
-            async with httpx.AsyncClient(timeout=1) as client:
+            async with httpx.AsyncClient(timeout=1, proxy=None, trust_env=False) as client:
                 response = await client.post(shutdown_url)
                 if response.status_code == 200:
                     logger.info("已向memory_server发送关闭信号")
@@ -901,6 +1283,7 @@ def _is_port_available(port: int) -> bool:
     import socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
+        set_port_probe_reuse(sock)
         sock.bind(("127.0.0.1", port))
         return True
     except OSError:
@@ -947,6 +1330,7 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     # 1) 配置 UVicorn
+    _behind_proxy = os.environ.get("NEKO_BEHIND_PROXY", "").strip().lower() in ("1", "true", "yes")
     config = uvicorn.Config(
         app=app,
         host="127.0.0.1",
@@ -954,6 +1338,11 @@ if __name__ == "__main__":
         log_level="info",
         loop="asyncio",
         reload=False,
+        proxy_headers=_behind_proxy,
+        forwarded_allow_ips="*" if _behind_proxy else None,
+        # WebSocket keep-alive: send server-initiated pings every 20s, close if no pong within 60s
+        ws_ping_interval=20.0,
+        ws_ping_timeout=60.0,
     )
     server = uvicorn.Server(config)
     
@@ -978,11 +1367,16 @@ if __name__ == "__main__":
     print(f"启动配置: {get_start_config()}")
 
     # 2) 信号处理：Ctrl+C 时快速关闭
+    _shutdown_state = {"signal_count": 0}
+
     def _signal_handler(signum, frame):
+        _shutdown_state["signal_count"] += 1
+        if _shutdown_state["signal_count"] > 1:
+            logger.warning("收到第二次关闭信号，立即强制退出。")
+            os._exit(130)
         logger.info("正在关闭服务器...")
         cleanup()
         server.should_exit = True
-        threading.Timer(3.0, lambda: os._exit(0)).start()
     
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -994,7 +1388,14 @@ if __name__ == "__main__":
     try:
         server.run()
     except KeyboardInterrupt:
-        # 信号处理器已经处理了，这里只是捕获异常防止 traceback
+        # Ctrl+C 正常关闭，不显示 traceback
+        logger.info("收到关闭信号（Ctrl+C），正在关闭服务器...")
+    except (asyncio.CancelledError, SystemExit):
+        # 正常的关闭信号
         pass
+    except Exception as e:
+        # 真正的错误，显示完整 traceback
+        logger.error(f"服务器运行时发生错误: {e}", exc_info=True)
+        raise
     finally:
         logger.info("服务器已关闭")

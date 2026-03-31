@@ -10,18 +10,18 @@
 """
 import re
 import locale
-import logging
 import threading
 import asyncio
 import os
 import hashlib
 from collections import OrderedDict
 from typing import Optional, Tuple, List, Any, Dict
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage
+from utils.llm_client import SystemMessage, HumanMessage, create_chat_llm
 from utils.config_manager import get_config_manager
+from utils.logger_config import get_module_logger
+from utils.token_tracker import set_call_type
 
-logger = logging.getLogger(__name__)
+logger = get_module_logger(__name__)
 
 # ============================================================================
 # 全局语言管理部分（原 global_language.py）
@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 
 # 全局语言变量（线程安全）
 _global_language: Optional[str] = None
-_global_language_lock = threading.Lock()
+_global_language_full: Optional[str] = None  # 保留完整语言代码（如 'zh-TW'），用于区分简繁体
+_global_language_lock = threading.RLock()
 _global_language_initialized = False
 
 # 全局区域标识（中文区/非中文区）
@@ -155,14 +156,17 @@ def initialize_global_language() -> str:
     Returns:
         初始化后的语言代码 ('zh', 'en', 'ja', 'ko')
     """
-    global _global_language, _global_region, _global_language_initialized
+    global _global_language, _global_language_full, _global_region, _global_language_initialized
     
     with _global_language_lock:
         if _global_language_initialized:
-            return _global_language or 'zh'
+            return _global_language or 'en'
         
         # 判断区域
-        _global_region = 'china' if _is_china_region() else 'non-china'
+        if _is_china_region():
+            _global_region = 'china'
+        else:
+            _global_region = 'non-china'
         logger.info(f"系统区域判断: {_global_region}")
         
         # 优先级1：尝试从 Steam 获取
@@ -170,13 +174,15 @@ def initialize_global_language() -> str:
         if steam_lang:
             # 归一化 Steam 语言代码为短格式
             _global_language = normalize_language_code(steam_lang, format='short')
-            logger.info(f"全局语言已初始化（来自Steam）: {_global_language}")
+            _global_language_full = normalize_language_code(steam_lang, format='full')
+            logger.info(f"全局语言已初始化（来自Steam）: {_global_language} (full: {_global_language_full})")
             _global_language_initialized = True
             return _global_language
         
         # 优先级2：从系统设置获取
         system_lang = _get_system_language()
-        _global_language = system_lang
+        _global_language = normalize_language_code(system_lang, format='short')
+        _global_language_full = normalize_language_code(system_lang, format='full')
         logger.info(f"全局语言已初始化（来自系统设置）: {_global_language}")
         _global_language_initialized = True
         return _global_language
@@ -198,6 +204,23 @@ def get_global_language() -> str:
         return _global_language or 'zh'
 
 
+def get_global_language_full() -> str:
+    """
+    获取全局语言变量（完整格式，保留 zh-TW 等区分）
+    
+    与 get_global_language() 的区别：后者返回短格式 ('zh')，
+    本函数保留完整代码 ('zh-TW')，用于需要区分简繁体的场景。
+    
+    Returns:
+        语言代码 ('zh', 'zh-TW', 'en', 'ja', 'ko', 'ru')，默认返回 'zh'
+    """
+    with _global_language_lock:
+        if not _global_language_initialized:
+            initialize_global_language()
+        
+        return _global_language_full or _global_language or 'zh'
+
+
 def set_global_language(language: str) -> None:
     """
     设置全局语言变量（手动设置，会覆盖自动检测）
@@ -205,7 +228,7 @@ def set_global_language(language: str) -> None:
     Args:
         language: 语言代码 ('zh', 'en', 'ja', 'ko')
     """
-    global _global_language, _global_language_initialized
+    global _global_language, _global_language_full, _global_language_initialized
     
     # 归一化语言代码
     lang_lower = language.lower()
@@ -223,10 +246,13 @@ def set_global_language(language: str) -> None:
         logger.warning(f"不支持的语言代码: {language}，保持当前语言")
         return
     
+    full_lang = normalize_language_code(language, format='full')
+    
     with _global_language_lock:
         _global_language = normalized_lang
+        _global_language_full = full_lang
         _global_language_initialized = True
-        logger.info(f"全局语言已手动设置为: {_global_language}")
+        logger.info(f"全局语言已手动设置为: {_global_language} (full: {_global_language_full})")
 
 
 def get_global_region() -> str:
@@ -260,10 +286,11 @@ def reset_global_language() -> None:
     """
     重置全局语言变量（重新初始化）
     """
-    global _global_language, _global_region, _global_language_initialized
+    global _global_language, _global_language_full, _global_region, _global_language_initialized
     
     with _global_language_lock:
         _global_language = None
+        _global_language_full = None
         _global_region = None
         _global_language_initialized = False
         logger.info("全局语言变量已重置")
@@ -289,7 +316,10 @@ def normalize_language_code(lang: str, format: str = 'short') -> str:
         归一化后的语言代码，如果无法识别则返回默认值 ('zh' 或 'zh-CN')
     """
     if not lang:
-        return 'zh' if format == 'short' else 'zh-CN'
+        if format == 'short':
+            return 'zh'
+        else:
+            return 'zh-CN'
     
     lang_lower = lang.lower().strip()
     
@@ -328,9 +358,15 @@ def normalize_language_code(lang: str, format: str = 'short') -> str:
     if lang_lower.startswith('zh'):
         # 区分简体和繁体中文
         if 'tw' in lang_lower or 'hant' in lang_lower or 'hk' in lang_lower:
-            return 'zh-TW' if format == 'full' else 'zh'
+            if format == 'full':
+                return 'zh-TW'
+            else:
+                return 'zh'
         else:
-            return 'zh' if format == 'short' else 'zh-CN'
+            if format == 'short':
+                return 'zh'
+            else:
+                return 'zh-CN'
     elif lang_lower.startswith('ja'):
         return 'ja'
     elif lang_lower.startswith('ko'):
@@ -342,7 +378,10 @@ def normalize_language_code(lang: str, format: str = 'short') -> str:
     else:
         # 无法识别的语言代码，返回默认值
         logger.debug(f"无法识别的语言代码: {lang}，返回默认值")
-        return 'zh' if format == 'short' else 'zh-CN'
+        if format == 'short':
+            return 'zh'
+        else:
+            return 'zh-CN'
 
 
 # ============================================================================
@@ -474,7 +513,10 @@ async def translate_with_translatepy(text: str, source_lang: str, target_lang: s
             'auto': 'auto'
         }
         
-        translatepy_source = TRANSLATEPY_LANG_MAP.get(source_lang, source_lang) if source_lang != 'unknown' else 'auto'
+        if source_lang != 'unknown':
+            translatepy_source = TRANSLATEPY_LANG_MAP.get(source_lang, source_lang)
+        else:
+            translatepy_source = 'auto'
         translatepy_target = TRANSLATEPY_LANG_MAP.get(target_lang, target_lang)
         
         # 如果源语言和目标语言相同，不需要翻译
@@ -496,7 +538,10 @@ async def translate_with_translatepy(text: str, source_lang: str, target_lang: s
                         # 创建单个服务实例进行翻译
                         service_instance = service_class()
                         # 如果 source 是 None，使用 'auto'
-                        source_param = source if source else 'auto'
+                        if source:
+                            source_param = source
+                        else:
+                            source_param = 'auto'
                         result = service_instance.translate(text_to_translate, destination_language=target, source_language=source_param)
                         if result and hasattr(result, 'result') and result.result:
                             return result.result
@@ -504,7 +549,10 @@ async def translate_with_translatepy(text: str, source_lang: str, target_lang: s
                         continue
                 
                 # 如果所有单个服务都失败，尝试使用 Translator 的自动选择（但只使用可访问的服务）
-                source_param = source if source else 'auto'
+                if source:
+                    source_param = source
+                else:
+                    source_param = 'auto'
                 result = translator.translate(text_to_translate, destination_language=target, source_language=source_param)
                 if result and hasattr(result, 'result') and result.result:
                     return result.result
@@ -523,12 +571,16 @@ async def translate_with_translatepy(text: str, source_lang: str, target_lang: s
             translated_chunks = []
             for chunk in chunks:
                 try:
+                    if translatepy_source != 'auto':
+                        chunk_source = translatepy_source
+                    else:
+                        chunk_source = None
                     chunk_result = await loop.run_in_executor(
                         None, 
                         _translate_sync, 
                         chunk, 
                         translatepy_target, 
-                        translatepy_source if translatepy_source != 'auto' else None
+                        chunk_source
                     )
                     if chunk_result:
                         translated_chunks.append(chunk_result)
@@ -543,12 +595,16 @@ async def translate_with_translatepy(text: str, source_lang: str, target_lang: s
         else:
             # 单次翻译，在线程池中运行
             loop = asyncio.get_running_loop()
+            if translatepy_source != 'auto':
+                chunk_source = translatepy_source
+            else:
+                chunk_source = None
             translated_text = await loop.run_in_executor(
                 None, 
                 _translate_sync, 
                 text, 
                 translatepy_target, 
-                translatepy_source if translatepy_source != 'auto' else None
+                chunk_source
             )
         
         if translated_text and translated_text.strip():
@@ -642,7 +698,11 @@ async def translate_text(text: str, target_lang: str, source_lang: Optional[str]
         logger.warning(f"获取区域信息失败: {e}，默认使用非中文区优先级")
         is_china = False
     
-    logger.debug(f"🔄 [翻译服务] 开始翻译流程: {source_lang} -> {target_lang}, 文本长度: {len(text)}, 区域: {'中文区' if is_china else '非中文区'}")
+    if is_china:
+        region_str = '中文区'
+    else:
+        region_str = '非中文区'
+    logger.debug(f"🔄 [翻译服务] 开始翻译流程: {source_lang} -> {target_lang}, 文本长度: {len(text)}, 区域: {region_str}")
     
     # 语言代码映射：我们的代码 -> Google Translate 代码
     GOOGLE_LANG_MAP = {
@@ -654,7 +714,10 @@ async def translate_text(text: str, target_lang: str, source_lang: Optional[str]
     }
     
     google_target = GOOGLE_LANG_MAP.get(target_lang, target_lang)
-    google_source = GOOGLE_LANG_MAP.get(source_lang, source_lang) if source_lang != 'unknown' else 'auto'
+    if source_lang != 'unknown':
+        google_source = GOOGLE_LANG_MAP.get(source_lang, source_lang)
+    else:
+        google_source = 'auto'
     
     # 辅助函数：尝试 Google 翻译（带超时机制）
     async def _try_google_translate(timeout: float = 5.0) -> Optional[str]:
@@ -684,7 +747,10 @@ async def translate_text(text: str, target_lang: str, source_lang: Optional[str]
                     translated_chunks = []
                     for i, chunk in enumerate(chunks):
                         # 第一个分段可以使用auto，后续分段使用已检测的源语言
-                        chunk_source = google_source if i > 0 or source_lang != 'unknown' else 'auto'
+                        if i > 0 or source_lang != 'unknown':
+                            chunk_source = google_source
+                        else:
+                            chunk_source = 'auto'
                         # googletrans 4.0+ 的 translate 方法返回协程，需要使用 await
                         result = await translator.translate(chunk, src=chunk_source, dest=google_target)
                         translated_chunks.append(result.text)
@@ -777,12 +843,10 @@ async def translate_text(text: str, target_lang: str, source_lang: Optional[str]
         source_name = lang_names.get(source_lang, source_lang)
         target_name = lang_names.get(target_lang, target_lang)
         
-        llm = ChatOpenAI(
-            model=emotion_config['model'],
-            base_url=emotion_config['base_url'],
-            api_key=emotion_config['api_key'],
-            temperature=0.3,  # 低temperature保证翻译准确性
-            timeout=10.0
+        llm = create_chat_llm(
+            emotion_config['model'], emotion_config['base_url'],
+            emotion_config['api_key'],
+            temperature=0.3, timeout=10.0,
         )
         
         system_prompt = f"""你是一个专业的翻译助手。请将用户提供的文本从{source_name}翻译成{target_name}。
@@ -798,9 +862,10 @@ async def translate_text(text: str, target_lang: str, source_lang: Optional[str]
             HumanMessage(content=text)
         ]
         
+        set_call_type("translation")
         response = await llm.ainvoke(messages)
         translated_text = response.content.strip()
-        
+
         logger.info(f"✅ [翻译服务] LLM翻译成功: {source_lang} -> {target_lang}")
         return translated_text, google_failed
         
@@ -864,7 +929,7 @@ class TranslationService:
         self._cache_lock = None  # 懒加载：在首次使用时创建异步锁
         self._cache_lock_init_lock = threading.Lock()  # 用于保护异步锁的创建过程
 
-    def _get_llm_client(self) -> Optional[ChatOpenAI]:
+    def _get_llm_client(self):
         """获取LLM客户端（用于翻译，复用 emotion 模型配置）"""
         try:
             config = self.config_manager.get_model_api_config('emotion')
@@ -876,13 +941,9 @@ class TranslationService:
             if self._llm_client is not None:
                 return self._llm_client
             
-            self._llm_client = ChatOpenAI(
-                model=config['model'],
-                base_url=config['base_url'],
-                api_key=config['api_key'],
-                temperature=0.3,
-                max_tokens=2000,
-                timeout=30.0,
+            self._llm_client = create_chat_llm(
+                config['model'], config['base_url'], config['api_key'],
+                temperature=0.3, max_completion_tokens=2000, timeout=30.0,
             )
             
             return self._llm_client
@@ -965,34 +1026,67 @@ class TranslationService:
         try:
             if target_lang_normalized == 'en':
                 target_lang_name = "English"
-                source_lang_name = "Chinese" if detected_lang_normalized == 'zh-CN' else "Japanese" if detected_lang_normalized == 'ja' else "the source language"
+                if detected_lang_normalized == 'zh-CN':
+                    source_lang_name = "Chinese"
+                elif detected_lang_normalized == 'ja':
+                    source_lang_name = "Japanese"
+                else:
+                    source_lang_name = "the source language"
             elif target_lang_normalized == 'ja':
                 target_lang_name = "Japanese"
-                source_lang_name = "Chinese" if detected_lang_normalized == 'zh-CN' else "English" if detected_lang_normalized == 'en' else "the source language"
+                if detected_lang_normalized == 'zh-CN':
+                    source_lang_name = "Chinese"
+                elif detected_lang_normalized == 'en':
+                    source_lang_name = "English"
+                else:
+                    source_lang_name = "the source language"
             elif target_lang_normalized == 'ko':
                 target_lang_name = "Korean"
-                source_lang_name = "Chinese" if detected_lang_normalized == 'zh-CN' else "English" if detected_lang_normalized == 'en' else "Japanese" if detected_lang_normalized == 'ja' else "the source language"
+                if detected_lang_normalized == 'zh-CN':
+                    source_lang_name = "Chinese"
+                elif detected_lang_normalized == 'en':
+                    source_lang_name = "English"
+                elif detected_lang_normalized == 'ja':
+                    source_lang_name = "Japanese"
+                else:
+                    source_lang_name = "the source language"
             elif target_lang_normalized == 'ru':
                 target_lang_name = "Russian"
-                source_lang_name = "Chinese" if detected_lang_normalized == 'zh-CN' else "English" if detected_lang_normalized == 'en' else "Japanese" if detected_lang_normalized == 'ja' else "the source language"
+                if detected_lang_normalized == 'zh-CN':
+                    source_lang_name = "Chinese"
+                elif detected_lang_normalized == 'en':
+                    source_lang_name = "English"
+                elif detected_lang_normalized == 'ja':
+                    source_lang_name = "Japanese"
+                else:
+                    source_lang_name = "the source language"
             else:  # zh-CN
                 target_lang_name = "简体中文"
-                source_lang_name = "English" if detected_lang_normalized == 'en' else "Japanese" if detected_lang_normalized == 'ja' else "Russian" if detected_lang_normalized == 'ru' else "the source language"
+                if detected_lang_normalized == 'en':
+                    source_lang_name = "English"
+                elif detected_lang_normalized == 'ja':
+                    source_lang_name = "Japanese"
+                elif detected_lang_normalized == 'ru':
+                    source_lang_name = "Russian"
+                else:
+                    source_lang_name = "the source language"
             
             system_prompt = f"""You are a professional translator. Translate the given text from {source_lang_name} to {target_lang_name}.
 
-Rules:
+======以下为规则======
 1. Keep the meaning and tone exactly the same
 2. Maintain any special formatting (like commas, spaces)
 3. For character names or nicknames, translate naturally
 4. Return ONLY the translated text, no explanations or additional text
-5. If the text is already in {target_lang_name}, return it unchanged"""
+5. If the text is already in {target_lang_name}, return it unchanged
+======以上为规则======"""
 
+            set_call_type("translation")
             response = await llm.ainvoke([
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=text)
             ])
-            
+
             translated = response.content.strip()
             if not translated:
                 logger.warning(f"翻译服务：LLM返回空结果，使用原文: '{text[:50]}...'")

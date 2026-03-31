@@ -5,6 +5,30 @@
 
 window.AgentHUD = window.AgentHUD || {};
 
+/**
+ * 精简 AI 生成的冗长任务描述为用户友好的短文本
+ * 例: "设置一个15分钟后的一次性提醒，内容为'起来活动'" → "15分钟后 起来活动"
+ * 例: "打开浏览器搜索今天的天气" → "搜索今天的天气"
+ */
+window.AgentHUD._shortenDesc = function (desc) {
+    if (!desc) return desc;
+    let s = desc.trim();
+    // 去掉开头的冗余动词
+    s = s.replace(/^(请|帮我?|帮忙|设置一个?|创建一个?|添加一个?|发送一[条个]?|执行|进行|打开|启动|调用|运行)\s*/, '');
+    // 去掉"的一次性提醒"
+    s = s.replace(/的一次性提醒/g, '');
+    // "，内容为'xxx'" → " xxx"
+    s = s.replace(/[，,]\s*(内容[为是]|提醒内容[为是])\s*['""\u2018\u2019\u201C\u201D「」]?/g, ' ');
+    // "提醒用户" → ""
+    s = s.replace(/提醒用户/g, '');
+    // 去掉引号
+    s = s.replace(/['""\u2018\u2019\u201C\u201D「」]/g, '');
+    // 去掉尾部的"的提醒"
+    s = s.replace(/[的地得]?提醒$/, '');
+    s = s.trim().replace(/^[，,。.、\s]+|[，,。.、\s]+$/g, '');
+    return s.slice(0, 50) || desc.slice(0, 50);
+};
+
 // 缓存当前显示器边界信息（多屏幕支持）
 let cachedDisplayHUD = {
     x: 0,
@@ -99,6 +123,7 @@ window.AgentHUD._createAgentPopupContent = function (popup) {
     });
     // 【状态机】初始显示"查询中..."，由状态机更新
     statusDiv.textContent = window.t ? window.t('settings.toggles.checking') : '查询中...';
+    statusDiv.setAttribute('data-i18n', 'settings.toggles.checking');
     popup.appendChild(statusDiv);
 
     // 【状态机严格控制】所有 agent 开关默认禁用，title显示查询中
@@ -124,55 +149,106 @@ window.AgentHUD._createAgentPopupContent = function (popup) {
             labelKey: 'settings.toggles.browserUse',
             initialDisabled: true,
             initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
+        },
+        {
+            id: 'agent-user-plugin',
+            label: window.t ? window.t('settings.toggles.userPlugin') : '用户插件',
+            labelKey: 'settings.toggles.userPlugin',
+            initialDisabled: true,
+            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
+        },
+        {
+            id: 'agent-openfang',
+            label: window.t ? window.t('settings.toggles.openfang') : '虚拟机',
+            labelKey: 'settings.toggles.openfang',
+            initialDisabled: true,
+            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
+        },
+        {
+            id: 'agent-openclaw',
+            label: window.t ? window.t('settings.toggles.openclawConnect') : 'OpenClaw',
+            labelKey: 'settings.toggles.openclawConnect',
+            initialDisabled: true,
+            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
         }
     ];
 
     agentToggles.forEach(toggle => {
         const toggleItem = this._createToggleItem(toggle, popup);
         popup.appendChild(toggleItem);
-    });
 
-    // 添加适配中的按钮（不可选）
-    const adaptingItems = [
-        { labelKey: 'settings.toggles.userPluginAdapting', fallback: '用户插件（开发中）' },
-        { labelKey: 'settings.toggles.moltbotAdapting', fallback: 'moltbot（开发中）' }
-    ];
+        // 用户插件侧边面板
+        if (toggle.id === 'agent-user-plugin' && typeof this._createSidePanelContainer === 'function') {
+            const sidePanel = this._createSidePanelContainer();
+            sidePanel.style.flexDirection = 'column';
+            sidePanel.style.alignItems = 'stretch';
+            sidePanel.style.gap = '4px';
+            sidePanel.style.padding = '6px 10px';
+            sidePanel._anchorElement = toggleItem;
+            sidePanel._popupElement = popup;
 
-    adaptingItems.forEach(item => {
-        const adaptingItem = document.createElement('div');
-        Object.assign(adaptingItem.style, {
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            padding: '6px 8px',
-            borderRadius: '6px',
-            fontSize: '13px',
-            whiteSpace: 'nowrap',
-            opacity: '0.5',
-            cursor: 'not-allowed',
-            color: '#666'
-        });
+            const configBtn = document.createElement('div');
+            const LABEL_KEY = 'settings.toggles.pluginManagementPanel';
+            const LABEL_FALLBACK = '管理面板';
+            Object.assign(configBtn.style, {
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '5px 8px',
+                cursor: 'pointer',
+                borderRadius: '6px',
+                fontSize: '12px',
+                whiteSpace: 'nowrap',
+                color: 'var(--neko-popup-text, #333)',
+                transition: 'background 0.15s ease'
+            });
+            const configIcon = document.createElement('span');
+            configIcon.textContent = '⚙';
+            configIcon.style.fontSize = '13px';
+            const configLabel = document.createElement('span');
+            configLabel.textContent = window.t ? window.t(LABEL_KEY) : LABEL_FALLBACK;
+            configLabel.setAttribute('data-i18n', LABEL_KEY);
+            configLabel.style.userSelect = 'none';
+            const configArrow = document.createElement('span');
+            configArrow.textContent = '↗';
+            configArrow.style.marginLeft = 'auto';
+            configArrow.style.opacity = '0.5';
+            configArrow.style.fontSize = '11px';
+            configBtn.appendChild(configIcon);
+            configBtn.appendChild(configLabel);
+            configBtn.appendChild(configArrow);
 
-        const indicator = document.createElement('div');
-        Object.assign(indicator.style, {
-            width: '20px',
-            height: '20px',
-            borderRadius: '50%',
-            border: '2px solid #ccc',
-            backgroundColor: 'transparent',
-            flexShrink: '0'
-        });
+            configBtn.addEventListener('mouseenter', () => {
+                configBtn.style.background = 'var(--neko-popup-hover, rgba(68,183,254,0.1))';
+            });
+            configBtn.addEventListener('mouseleave', () => {
+                configBtn.style.background = 'transparent';
+            });
 
-        const label = document.createElement('span');
-        label.textContent = window.t ? window.t(item.labelKey) : item.fallback;
-        label.setAttribute('data-i18n', item.labelKey);
-        label.style.userSelect = 'none';
-        label.style.fontSize = '13px';
-        label.style.color = '#999';
+            let isOpening = false;
+            configBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (isOpening) return;
+                isOpening = true;
+                const dashboardUrl = '/api/agent/user_plugin/dashboard';
+                const width = Math.min(1280, Math.round(screen.width * 0.8));
+                const height = Math.min(900, Math.round(screen.height * 0.8));
+                const left = Math.max(0, Math.floor((screen.width - width) / 2));
+                const top = Math.max(0, Math.floor((screen.height - height) / 2));
+                const features = `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes`;
+                if (typeof window.openOrFocusWindow === 'function') {
+                    window.openOrFocusWindow(dashboardUrl, 'neko_plugin_dashboard', features);
+                } else {
+                    window.open(dashboardUrl, 'neko_plugin_dashboard', features);
+                }
+                setTimeout(() => { isOpening = false; }, 500);
+            });
 
-        adaptingItem.appendChild(indicator);
-        adaptingItem.appendChild(label);
-        popup.appendChild(adaptingItem);
+            sidePanel.appendChild(configBtn);
+            document.body.appendChild(sidePanel);
+            this._attachSidePanelHover(toggleItem, sidePanel);
+        }
+
     });
 };
 
@@ -216,14 +292,14 @@ window.AgentHUD.createAgentTaskHUD = function () {
         position: 'fixed',
         width: '320px',
         maxHeight: '60vh',
-        background: 'rgba(255, 255, 255, 0.65)',
+        background: 'var(--neko-popup-bg, rgba(255, 255, 255, 0.65))',
         backdropFilter: 'saturate(180%) blur(20px)',
         WebkitBackdropFilter: 'saturate(180%) blur(20px)',
         borderRadius: '8px',
         padding: '0',
-        border: '1px solid rgba(255, 255, 255, 0.18)',
-        boxShadow: '0 2px 4px rgba(0,0,0,0.04), 0 8px 16px rgba(0,0,0,0.08), 0 16px 32px rgba(0,0,0,0.04)',
-        color: '#333',
+        border: 'var(--neko-popup-border, 1px solid rgba(255, 255, 255, 0.18))',
+        boxShadow: 'var(--neko-popup-shadow, 0 2px 4px rgba(0,0,0,0.04), 0 8px 16px rgba(0,0,0,0.08), 0 16px 32px rgba(0,0,0,0.04))',
+        color: 'var(--neko-popup-text, #333)',
         fontFamily: "'Segoe UI', 'SF Pro Display', -apple-system, sans-serif",
         fontSize: '13px',
         zIndex: '9999',
@@ -236,7 +312,7 @@ window.AgentHUD.createAgentTaskHUD = function () {
         cursor: 'move',
         userSelect: 'none',
         willChange: 'transform, width',
-        touchAction: 'none'
+        contain: 'layout style paint'
     });
 
     // 应用保存的位置
@@ -253,10 +329,11 @@ window.AgentHUD.createAgentTaskHUD = function () {
         justifyContent: 'space-between',
         padding: '12px 16px',
         margin: '0',
-        backgroundColor: 'rgba(255, 255, 255, 0.85)',
+        backgroundColor: 'var(--neko-hud-header-bg, rgba(255, 255, 255, 0.85))',
         borderTopLeftRadius: '8px',
         borderTopRightRadius: '8px',
-        borderBottom: '1px solid rgba(0, 0, 0, 0.08)',
+        borderBottom: '1px solid var(--neko-popup-separator, rgba(0, 0, 0, 0.08))',
+        touchAction: 'none',
         transition: 'padding 0.4s ease, margin 0.4s ease, border-color 0.4s ease, border-radius 0.4s ease, background-color 0.4s ease'
     });
 
@@ -266,7 +343,7 @@ window.AgentHUD.createAgentTaskHUD = function () {
     Object.assign(title.style, {
         fontWeight: '600',
         fontSize: '15px',
-        color: '#333',
+        color: 'var(--neko-popup-text, #333)',
         transition: 'width 0.3s ease, opacity 0.3s ease',
         overflow: 'hidden',
         whiteSpace: 'nowrap'
@@ -315,7 +392,50 @@ window.AgentHUD.createAgentTaskHUD = function () {
     });
     minimizeBtn.title = window.t ? window.t('agent.taskHud.minimize') : '折叠/展开';
 
+    // 终止按钮
+    const cancelBtn = document.createElement('div');
+    cancelBtn.id = 'agent-task-hud-cancel';
+    cancelBtn.innerHTML = '✕';
+    Object.assign(cancelBtn.style, {
+        width: '22px',
+        height: '22px',
+        borderRadius: '6px',
+        background: 'var(--neko-popup-error-bg, rgba(220, 53, 69, 0.12))',
+        display: 'none',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: '11px',
+        fontWeight: 'bold',
+        color: 'var(--neko-popup-error, #dc3545)',
+        cursor: 'pointer',
+        transition: 'all 0.2s ease',
+        flexShrink: '0'
+    });
+    cancelBtn.title = window.t ? window.t('agent.taskHud.cancelAll') : '终止所有任务';
+    cancelBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const msg = window.t ? window.t('agent.taskHud.cancelConfirm') : '确定要终止所有正在进行的任务吗？';
+        const title = window.t ? window.t('agent.taskHud.cancelAll') : '终止所有任务';
+        const confirmed = await window.showConfirm(msg, title, { danger: true });
+        if (!confirmed) return;
+        try {
+            cancelBtn.style.opacity = '0.5';
+            cancelBtn.style.pointerEvents = 'none';
+            await fetch('/api/agent/admin/control', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'end_all' })
+            });
+        } catch (err) {
+            console.error('[AgentHUD] Cancel all tasks failed:', err);
+        } finally {
+            cancelBtn.style.opacity = '1';
+            cancelBtn.style.pointerEvents = 'auto';
+        }
+    });
+
     headerRight.appendChild(stats);
+    headerRight.appendChild(cancelBtn);
     headerRight.appendChild(minimizeBtn);
     header.appendChild(title);
     header.appendChild(headerRight);
@@ -331,7 +451,8 @@ window.AgentHUD.createAgentTaskHUD = function () {
         padding: '0 16px 16px 16px',
         maxHeight: 'calc(60vh - 80px)',
         overflowY: 'auto',
-        transition: 'max-height 0.3s ease, opacity 0.3s ease, padding 0.3s ease'
+        transition: 'max-height 0.3s ease, opacity 0.3s ease, padding 0.3s ease',
+        contain: 'layout style'
     });
 
     // 整体折叠逻辑 (key v2: reset stale collapsed state)
@@ -361,7 +482,7 @@ window.AgentHUD.createAgentTaskHUD = function () {
             hud.style.gap = '0'; 
             
             header.style.padding = '12px 16px';
-            header.style.backgroundColor = 'rgba(255, 255, 255, 0.85)';
+            header.style.backgroundColor = 'var(--neko-hud-header-bg, rgba(255, 255, 255, 0.85))';
             header.style.borderBottom = 'none';
             header.style.justifyContent = 'center';
             header.style.borderRadius = '8px'; // round all corners
@@ -376,8 +497,8 @@ window.AgentHUD.createAgentTaskHUD = function () {
             hud.style.gap = '12px'; 
             
             header.style.padding = '12px 16px';
-            header.style.backgroundColor = 'rgba(255, 255, 255, 0.85)';
-            header.style.borderBottom = '1px solid rgba(0, 0, 0, 0.08)';
+            header.style.backgroundColor = 'var(--neko-hud-header-bg, rgba(255, 255, 255, 0.85))';
+            header.style.borderBottom = '1px solid var(--neko-popup-separator, rgba(0, 0, 0, 0.08))';
             header.style.justifyContent = 'space-between';
             header.style.borderRadius = '8px 8px 0 0'; // round only top corners
             
@@ -412,7 +533,7 @@ window.AgentHUD.createAgentTaskHUD = function () {
     emptyContent.textContent = window.t ? window.t('agent.taskHud.noTasks') : '暂无活动任务';
     Object.assign(emptyContent.style, {
         textAlign: 'center',
-        color: '#64748b',
+        color: 'var(--neko-popup-text-sub, #64748b)',
         padding: '20px',
         fontSize: '12px',
         transition: 'all 0.3s ease'
@@ -507,21 +628,118 @@ window.AgentHUD.hideAgentTaskHUD = function () {
 
 // 更新任务 HUD 内容
 window.AgentHUD.updateAgentTaskHUD = function (tasksData) {
+    // Cache latest snapshot so deferred re-render won't use stale closure data.
+    this._latestTasksData = tasksData;
+
+    // RAF throttle: coalesce rapid-fire WebSocket updates into a single frame
+    if (this._updateRafId) return;
+    this._updateRafId = requestAnimationFrame(() => {
+        this._updateRafId = null;
+        this._doUpdateAgentTaskHUD();
+    });
+};
+
+// Internal: actual HUD update logic (called via RAF throttle)
+window.AgentHUD._doUpdateAgentTaskHUD = function () {
+    const tasksData = this._latestTasksData;
+    if (!tasksData) return;
+
     const taskList = document.getElementById('agent-task-list');
     const emptyState = document.getElementById('agent-task-empty');
     const runningCount = document.getElementById('hud-running-count');
     const queuedCount = document.getElementById('hud-queued-count');
+    const cancelBtn = document.getElementById('agent-task-hud-cancel');
 
-    if (!taskList) return;
+    if (!taskList) {
+        // HUD not yet created — create it now so incoming tasks can render
+        if (typeof window.AgentHUD.createAgentTaskHUD === 'function') {
+            window.AgentHUD.createAgentTaskHUD();
+        }
+        const retryList = document.getElementById('agent-task-list');
+        if (!retryList) return;
+        // Re-call with the now-created HUD
+        return this._doUpdateAgentTaskHUD();
+    }
 
     // 更新统计数据
     if (runningCount) runningCount.textContent = tasksData.running_count || 0;
     if (queuedCount) queuedCount.textContent = tasksData.queued_count || 0;
 
-    // 获取活动任务（running 和 queued）
-    const activeTasks = (tasksData.tasks || []).filter(t =>
-        t.status === 'running' || t.status === 'queued'
+    // Show running/queued tasks + recently completed/failed tasks (linger 10s)
+    if (!this._taskFirstSeen) this._taskFirstSeen = {};
+    if (!this._taskStatusById) this._taskStatusById = {};
+    if (!this._taskTerminalAt) this._taskTerminalAt = {};
+    const now = Date.now();
+    const MIN_DISPLAY_MS = 10000; // completed/failed tasks linger for 10 seconds
+
+    // Track first-seen and terminal-at timestamps
+    (tasksData.tasks || []).forEach(t => {
+        if (!t.id) return;
+        if (!this._taskFirstSeen[t.id]) this._taskFirstSeen[t.id] = now;
+        this._taskStatusById[t.id] = t.status;
+        // Record when a task first transitions to terminal status
+        const isTerminal = t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled';
+        if (isTerminal && !this._taskTerminalAt[t.id]) {
+            this._taskTerminalAt[t.id] = now;
+        }
+    });
+
+    // Show running/queued tasks + terminal tasks still within linger window
+    const activeTasks = (tasksData.tasks || []).filter(t => {
+        if (t.status === 'running' || t.status === 'queued') return true;
+        const termAt = this._taskTerminalAt[t.id];
+        if (termAt && (now - termAt) < MIN_DISPLAY_MS) return true;
+        return false;
+    });
+
+    // Schedule a deferred re-render to clean up lingering cards after they expire
+    const lingeringTasks = activeTasks.filter(t =>
+        t.status !== 'running' && t.status !== 'queued'
     );
+    if (lingeringTasks.length > 0) {
+        // Reset timer so newly arrived terminal tasks get a full linger window
+        if (this._lingerTimer) clearTimeout(this._lingerTimer);
+        this._lingerTimer = setTimeout(() => {
+            this._lingerTimer = null;
+            if (window._agentTaskMap) {
+                const snapshot = {
+                    tasks: Array.from(window._agentTaskMap.values()),
+                    running_count: 0,
+                    queued_count: 0
+                };
+                snapshot.tasks.forEach(t => {
+                    if (t.status === 'running') snapshot.running_count++;
+                    if (t.status === 'queued') snapshot.queued_count++;
+                });
+                window.AgentHUD.updateAgentTaskHUD(snapshot);
+            }
+        }, MIN_DISPLAY_MS);
+    }
+
+    // Auto-show HUD when there are active tasks (handles race with checkAndToggleTaskHUD)
+    if (activeTasks.length > 0) {
+        const hud = document.getElementById('agent-task-hud');
+        if (hud && (hud.style.display === 'none' || hud.style.opacity === '0')) {
+            if (typeof window.AgentHUD.showAgentTaskHUD === 'function') {
+                window.AgentHUD.showAgentTaskHUD();
+            }
+        }
+    }
+
+    // Clean up old cache entries (older than 30s since terminal or first seen)
+    for (const tid in this._taskFirstSeen) {
+        const terminalAt = this._taskTerminalAt[tid];
+        const cleanupBase = terminalAt || this._taskFirstSeen[tid];
+        if (!cleanupBase || now - cleanupBase <= 30000) continue;
+        delete this._taskFirstSeen[tid];
+        delete this._taskStatusById[tid];
+        delete this._taskTerminalAt[tid];
+    }
+
+    if (cancelBtn) {
+        const hasCancelable = activeTasks.some(t => t.status === 'running' || t.status === 'queued');
+        cancelBtn.style.display = hasCancelable ? 'flex' : 'none';
+    }
 
     // 显示/隐藏空状态（保留折叠状态）
     if (emptyState) {
@@ -536,15 +754,192 @@ window.AgentHUD.updateAgentTaskHUD = function (tasksData) {
         }
     }
 
-    // 清除旧的任务卡片（保留空状态）
-    const existingCards = taskList.querySelectorAll('.task-card');
-    existingCards.forEach(card => card.remove());
+    // 排序：前台任务（computer_use / mcp）优先，插件任务沉底
+    const _taskSortPriority = (t) => {
+        if (t.type === 'computer_use' || t.type === 'browser_use') return 0;
+        if (t.type === 'mcp') return 1;
+        // user_plugin / plugin_direct → 沉底
+        return 2;
+    };
+    activeTasks.sort((a, b) => _taskSortPriority(a) - _taskSortPriority(b));
 
-    // 添加任务卡片
-    activeTasks.forEach(task => {
-        const card = this._createTaskCard(task);
-        taskList.appendChild(card);
+    // --- Differential DOM update: avoid full rebuild to prevent backdrop-filter recomposite flicker ---
+    const activeIds = new Set(activeTasks.map(t => t.id));
+    const existingCards = taskList.querySelectorAll('.task-card');
+    const existingById = new Map();
+    existingCards.forEach(card => {
+        const tid = card.dataset.taskId;
+        if (tid && activeIds.has(tid)) {
+            existingById.set(tid, card);
+        } else {
+            card.remove(); // remove cards no longer active
+        }
     });
+
+    // Build the desired card order, reusing/updating existing cards
+    const fragment = document.createDocumentFragment();
+    activeTasks.forEach(task => {
+        const existing = existingById.get(task.id);
+        if (existing) {
+            const node = this._updateTaskCard(existing, task);
+            fragment.appendChild(node || existing);
+        } else {
+            const card = this._createTaskCard(task);
+            fragment.appendChild(card);
+        }
+    });
+
+    // Re-append empty state first (it should stay at top), then task cards
+    if (emptyState && emptyState.parentNode === taskList) {
+        taskList.insertBefore(fragment, emptyState.nextSibling);
+    } else {
+        taskList.appendChild(fragment);
+    }
+};
+
+// 差异更新已有任务卡片（避免全量 DOM 重建触发 backdrop-filter 重合成导致模型闪烁）
+window.AgentHUD._updateTaskCard = function (card, task) {
+    const isRunning = task.status === 'running';
+    const isCompleted = task.status === 'completed';
+    const isFailed = task.status === 'failed';
+    const isCancelled = task.status === 'cancelled';
+    const isTerminal = isCompleted || isFailed || isCancelled;
+
+    // Update start_time data attribute
+    if (task.start_time) card.dataset.startTime = task.start_time;
+
+    // Compute status visuals
+    let statusColor, statusText, cardBg, cardBorder;
+    if (isCompleted) {
+        statusColor = 'var(--neko-popup-success, #16a34a)';
+        statusText = window.t ? window.t('agent.taskHud.statusCompleted') : '已完成';
+        cardBg = 'var(--neko-popup-success-bg, rgba(22, 163, 74, 0.06))';
+        cardBorder = 'var(--neko-popup-success-border, rgba(22, 163, 74, 0.2))';
+    } else if (isFailed) {
+        statusColor = 'var(--neko-popup-error, #dc2626)';
+        statusText = window.t ? window.t('agent.taskHud.statusFailed') : '失败';
+        cardBg = 'var(--neko-popup-error-bg, rgba(220, 38, 38, 0.06))';
+        cardBorder = 'var(--neko-popup-error-border, rgba(220, 38, 38, 0.2))';
+    } else if (isCancelled) {
+        statusColor = 'var(--neko-popup-text-sub, #666)';
+        statusText = window.t ? window.t('agent.taskHud.statusCancelled') : '已取消';
+        cardBg = 'var(--neko-popup-bg, rgba(249, 249, 249, 0.6))';
+        cardBorder = 'var(--neko-popup-border-color, rgba(0, 0, 0, 0.06))';
+    } else if (isRunning) {
+        statusColor = 'var(--neko-popup-accent, #2a7bc4)';
+        statusText = window.t ? window.t('agent.taskHud.statusRunning') : '运行中';
+        cardBg = 'var(--neko-popup-accent-bg, rgba(42, 123, 196, 0.08))';
+        cardBorder = 'var(--neko-popup-accent-border, rgba(42, 123, 196, 0.25))';
+    } else {
+        statusColor = 'var(--neko-popup-text-sub, #666)';
+        statusText = window.t ? window.t('agent.taskHud.statusQueued') : '队列中';
+        cardBg = 'var(--neko-popup-bg, rgba(249, 249, 249, 0.6))';
+        cardBorder = 'var(--neko-popup-border-color, rgba(0, 0, 0, 0.06))';
+    }
+
+    // Use semantic state key to avoid comparing CSS var() strings against resolved style values
+    const stateKey = isCancelled ? 'cancelled' : isCompleted ? 'completed' : isFailed ? 'failed' : isRunning ? 'running' : 'queued';
+    if (card.dataset.cardState !== stateKey) {
+        card.dataset.cardState = stateKey;
+        card.style.background = cardBg;
+        card.style.border = `1px solid ${cardBorder}`;
+        card.style.opacity = isTerminal ? '0.6' : '1';
+    }
+
+    // Update status badge text & color (keyed by same state)
+    const badge = card.querySelector('.task-status-badge');
+    if (badge && badge.dataset.statusState !== stateKey) {
+        badge.dataset.statusState = stateKey;
+        badge.textContent = statusText;
+        badge.style.color = statusColor;
+        const badgeBg = isCompleted ? 'var(--neko-popup-success-bg, rgba(22, 163, 74, 0.1))' : isFailed ? 'var(--neko-popup-error-bg, rgba(220, 38, 38, 0.1))' : isRunning ? 'var(--neko-popup-accent-bg, rgba(42, 123, 196, 0.12))' : 'var(--neko-popup-bg, rgba(0, 0, 0, 0.05))';
+        badge.style.background = badgeBg;
+    }
+
+    // Update header marginBottom (running tasks have extra space for progress row)
+    const headerDiv = card.firstElementChild;
+    if (headerDiv) {
+        const expectedMB = isRunning ? '6px' : '0';
+        if (headerDiv.style.marginBottom !== expectedMB) headerDiv.style.marginBottom = expectedMB;
+    }
+
+    // Hide per-card cancel button for terminal tasks
+    const cardCancelBtn = card.querySelector('.task-card-cancel');
+    if (cardCancelBtn) {
+        const cancelDisplay = isTerminal ? 'none' : 'flex';
+        if (cardCancelBtn.style.display !== cancelDisplay) cardCancelBtn.style.display = cancelDisplay;
+    }
+
+    // Handle progress row: add if now running but missing, remove if no longer running
+    const progressRow = card.querySelector('.task-progress-row');
+    if (isRunning && !progressRow) {
+        // Status just changed to running — rebuild the card cleanly
+        const newCard = this._createTaskCard(task);
+        const parent = card.parentNode;
+        if (parent) parent.replaceChild(newCard, card);
+        return newCard;
+    } else if (!isRunning && progressRow) {
+        // No longer running — remove progress row
+        progressRow.remove();
+    }
+
+    // Update running timer inline so it stays current between setInterval ticks
+    if (isRunning && task.start_time) {
+        const timeEl = card.querySelector('[id^="task-time-"]');
+        if (timeEl) {
+            const startTime = new Date(task.start_time);
+            const elapsed = Math.floor((Date.now() - startTime.getTime()) / 1000);
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+            timeEl.textContent = `\u23f1\ufe0f ${minutes}:${seconds.toString().padStart(2, '0')}`;
+        }
+    }
+
+    // Update progress bar and step counter for running tasks
+    if (isRunning && progressRow) {
+        const fill = progressRow.querySelector('.task-progress-fill');
+        if (fill) {
+            const hasDeterminateProgress = typeof task.progress === 'number' && task.progress >= 0;
+            if (hasDeterminateProgress) {
+                const pct = Math.min(100, Math.max(0, Math.round(task.progress * 100)));
+                const newWidth = pct + '%';
+                if (fill.style.width !== newWidth) fill.style.width = newWidth;
+                // Switch from indeterminate animation to determinate if needed
+                if (fill.style.animation) {
+                    fill.style.animation = '';
+                    fill.style.transition = 'width 0.3s ease';
+                }
+            } else {
+                // Revert to indeterminate state
+                if (!fill.style.animation || fill.style.width !== '30%') {
+                    fill.style.width = '30%';
+                    fill.style.transition = '';
+                    fill.style.animation = 'taskProgress 1.5s ease-in-out infinite';
+                }
+            }
+        }
+        const stepEl = progressRow.querySelector('.task-progress-step');
+        if (typeof task.step === 'number' && typeof task.step_total === 'number' && task.step_total > 0) {
+            const stepText = `${task.step}/${task.step_total}`;
+            if (stepEl) {
+                if (stepEl.textContent !== stepText) stepEl.textContent = stepText;
+            } else {
+                // Step counter appeared after card was created — append it
+                const newStep = document.createElement('span');
+                newStep.className = 'task-progress-step';
+                newStep.textContent = stepText;
+                Object.assign(newStep.style, {
+                    color: 'var(--neko-popup-text-sub, #999)',
+                    fontSize: '10px',
+                    flexShrink: '0'
+                });
+                progressRow.appendChild(newStep);
+            }
+        } else if (stepEl) {
+            // Step info no longer available — remove stale element
+            stepEl.remove();
+        }
+    }
 };
 
 // 创建单个任务卡片
@@ -557,121 +952,259 @@ window.AgentHUD._createTaskCard = function (task) {
     }
 
     const isRunning = task.status === 'running';
-    const statusColor = isRunning ? 'var(--neko-popup-accent, #2a7bc4)' : 'var(--neko-popup-text-sub, #666)';
-    const statusText = isRunning
-        ? (window.t ? window.t('agent.taskHud.statusRunning') : '运行中')
-        : (window.t ? window.t('agent.taskHud.statusQueued') : '队列中');
+    const isCompleted = task.status === 'completed';
+    const isFailed = task.status === 'failed';
+    const isCancelled = task.status === 'cancelled';
+    const isTerminal = isCompleted || isFailed || isCancelled;
+
+    let statusColor, statusText, cardBg, cardBorder;
+    if (isCompleted) {
+        statusColor = 'var(--neko-popup-success, #16a34a)';
+        statusText = window.t ? window.t('agent.taskHud.statusCompleted') : '已完成';
+        cardBg = 'var(--neko-popup-success-bg, rgba(22, 163, 74, 0.06))';
+        cardBorder = 'var(--neko-popup-success-border, rgba(22, 163, 74, 0.2))';
+    } else if (isFailed) {
+        statusColor = 'var(--neko-popup-error, #dc2626)';
+        statusText = window.t ? window.t('agent.taskHud.statusFailed') : '失败';
+        cardBg = 'var(--neko-popup-error-bg, rgba(220, 38, 38, 0.06))';
+        cardBorder = 'var(--neko-popup-error-border, rgba(220, 38, 38, 0.2))';
+    } else if (isCancelled) {
+        statusColor = 'var(--neko-popup-text-sub, #666)';
+        statusText = window.t ? window.t('agent.taskHud.statusCancelled') : '已取消';
+        cardBg = 'var(--neko-popup-bg, rgba(249, 249, 249, 0.6))';
+        cardBorder = 'var(--neko-popup-border-color, rgba(0, 0, 0, 0.06))';
+    } else if (isRunning) {
+        statusColor = 'var(--neko-popup-accent, #2a7bc4)';
+        statusText = window.t ? window.t('agent.taskHud.statusRunning') : '运行中';
+        cardBg = 'var(--neko-popup-accent-bg, rgba(42, 123, 196, 0.08))';
+        cardBorder = 'var(--neko-popup-accent-border, rgba(42, 123, 196, 0.25))';
+    } else {
+        statusColor = 'var(--neko-popup-text-sub, #666)';
+        statusText = window.t ? window.t('agent.taskHud.statusQueued') : '队列中';
+        cardBg = 'var(--neko-popup-bg, rgba(249, 249, 249, 0.6))';
+        cardBorder = 'var(--neko-popup-border-color, rgba(0, 0, 0, 0.06))';
+    }
 
     Object.assign(card.style, {
-        background: isRunning ? 'var(--neko-popup-accent-bg, rgba(42, 123, 196, 0.08))' : 'var(--neko-popup-bg, rgba(249, 249, 249, 0.6))',
+        background: cardBg,
         borderRadius: '8px',
-        padding: '12px',
-        border: `1px solid ${isRunning ? 'var(--neko-popup-accent-border, rgba(42, 123, 196, 0.25))' : 'var(--neko-popup-border, rgba(0, 0, 0, 0.06))'}`,
-        transition: 'all 0.2s ease'
+        padding: '10px 12px',
+        border: `1px solid ${cardBorder}`,
+        transition: 'all 0.2s ease',
+        opacity: isTerminal ? '0.6' : '1'
     });
 
-    // 任务类型和状态
+    // === 第一行：图标 + 名称 + 状态徽章 + 取消按钮 ===
     const header = document.createElement('div');
     Object.assign(header.style, {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        marginBottom: '8px'
+        marginBottom: isRunning ? '6px' : '0'
     });
 
-    // 任务类型图标
-    const typeIcon = task.source === 'computer_use' ? '🖱️' : '⚙️';
-    const typeName = task.type || task.source || 'unknown';
+    // 任务类型图标和名称
+    const rawTypeName = task.type || task.source || 'unknown';
+    const params = task.params || {};
+
+    // 根据类型确定图标
+    let typeIcon;
+    if (rawTypeName === 'user_plugin' || rawTypeName === 'plugin_direct') {
+        typeIcon = '🧩';
+    } else if (rawTypeName === 'computer_use') {
+        typeIcon = '🖱️';
+    } else if (rawTypeName === 'browser_use') {
+        typeIcon = '🌐';
+    } else if (rawTypeName === 'mcp') {
+        typeIcon = '🔌';
+    } else {
+        typeIcon = '⚙️';
+    }
+
+    // 根据类型确定名称
+    let typeName = rawTypeName;
+    if (rawTypeName === 'user_plugin' || rawTypeName === 'plugin_direct') {
+        // 优先级：plugin_name > plugin_id > 翻译文本
+        typeName = params.plugin_name || params.plugin_id || (window.t ? window.t('agent.taskHud.typeUserPlugin') : '用户插件');
+    } else if (rawTypeName === 'computer_use') {
+        typeName = window.t ? window.t('agent.taskHud.typeComputerUse') : '电脑控制';
+    } else if (rawTypeName === 'browser_use') {
+        typeName = window.t ? window.t('agent.taskHud.typeBrowserUse') : '浏览器控制';
+    } else if (rawTypeName === 'mcp') {
+        typeName = window.t ? window.t('agent.taskHud.typeMCP') : 'MCP工具';
+    }
 
     const typeLabel = document.createElement('span');
-    typeLabel.innerHTML = `${typeIcon} <span style="color: #666; font-size: 11px;">${typeName}</span>`;
+    typeLabel.style.whiteSpace = 'nowrap';
+    typeLabel.style.overflow = 'hidden';
+    typeLabel.style.textOverflow = 'ellipsis';
+    typeLabel.style.minWidth = '0';
+
+    // 使用 textContent 防止 XSS（避免 plugin_name 中的 HTML 被解析）
+    const iconSpan = document.createElement('span');
+    iconSpan.textContent = typeIcon + ' ';
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = typeName;
+    Object.assign(nameSpan.style, {
+        color: 'var(--neko-popup-text-sub, #666)',
+        fontSize: '12px',
+        fontWeight: '500'
+    });
+    typeLabel.appendChild(iconSpan);
+    typeLabel.appendChild(nameSpan);
 
     const statusBadge = document.createElement('span');
+    statusBadge.className = 'task-status-badge';
     statusBadge.textContent = statusText;
     Object.assign(statusBadge.style, {
         color: statusColor,
         fontSize: '11px',
         fontWeight: '500',
-        padding: '2px 8px',
-        background: isRunning ? 'var(--neko-popup-accent-bg, rgba(42, 123, 196, 0.12))' : 'var(--neko-popup-bg, rgba(0, 0, 0, 0.05))',
-        borderRadius: '10px'
+        padding: '1px 8px',
+        background: isCompleted ? 'var(--neko-popup-success-bg, rgba(22, 163, 74, 0.1))' : isFailed ? 'var(--neko-popup-error-bg, rgba(220, 38, 38, 0.1))' : isRunning ? 'var(--neko-popup-accent-bg, rgba(42, 123, 196, 0.12))' : 'var(--neko-popup-bg, rgba(0, 0, 0, 0.05))',
+        borderRadius: '10px',
+        flexShrink: '0'
     });
 
-    header.appendChild(typeLabel);
-    header.appendChild(statusBadge);
+    const headerLeft = document.createElement('div');
+    Object.assign(headerLeft.style, { display: 'flex', alignItems: 'center', gap: '6px', minWidth: '0', flex: '1', overflow: 'hidden' });
+    headerLeft.appendChild(typeLabel);
+    headerLeft.appendChild(statusBadge);
+
+    const taskCancelBtn = document.createElement('div');
+    taskCancelBtn.className = 'task-card-cancel';
+    taskCancelBtn.innerHTML = '✕';
+    Object.assign(taskCancelBtn.style, {
+        width: '18px',
+        height: '18px',
+        borderRadius: '4px',
+        background: 'var(--neko-hud-subtle-bg, rgba(0, 0, 0, 0.06))',
+        display: isTerminal ? 'none' : 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: '10px',
+        color: 'var(--neko-popup-text-sub, #999)',
+        cursor: 'pointer',
+        transition: 'all 0.15s ease',
+        flexShrink: '0',
+        marginLeft: '6px'
+    });
+    taskCancelBtn.title = window.t ? window.t('agent.taskHud.cancelAll') : '终止任务';
+    taskCancelBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        taskCancelBtn.style.opacity = '0.4';
+        taskCancelBtn.style.pointerEvents = 'none';
+        try {
+            await fetch(`/api/agent/tasks/${encodeURIComponent(task.id)}/cancel`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+        } catch (err) {
+            console.error('[AgentHUD] Cancel task failed:', err);
+        }
+    });
+
+    header.appendChild(headerLeft);
+    header.appendChild(taskCancelBtn);
     card.appendChild(header);
 
-    // 任务参数/描述
-    const params = task.params || {};
-    let description = '';
-    if (params.query) {
-        description = params.query;
-    } else if (params.instruction) {
-        // computer_use 任务使用 instruction 字段
-        description = params.instruction;
-    } else if (task.original_query) {
-        // planner 任务使用 original_query 字段
-        description = task.original_query;
-    } else if (params.tool_name) {
-        description = params.tool_name;
-    } else if (params.action) {
-        description = params.action;
-    } else {
-        description = task.id?.substring(0, 8) || 'Task';
+    // === 描述行：显示任务具体内容（如"15分钟后 起来活动"） ===
+    const rawDesc = params.description || params.instruction || '';
+    const descText = rawDesc ? window.AgentHUD._shortenDesc(rawDesc) : '';
+    if (descText) {
+        const descRow = document.createElement('div');
+        descRow.textContent = descText;
+        if (rawDesc !== descText) descRow.title = rawDesc; // hover 显示完整内容
+        Object.assign(descRow.style, {
+            color: 'var(--neko-popup-text-sub, #888)',
+            fontSize: '11px',
+            lineHeight: '1.3',
+            marginTop: '3px',
+            marginBottom: isRunning ? '3px' : '0',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+        });
+        card.appendChild(descRow);
     }
 
-    const descDiv = document.createElement('div');
-    descDiv.textContent = description.length > 60 ? description.substring(0, 60) + '...' : description;
-    Object.assign(descDiv.style, {
-        color: '#444',
-        fontSize: '12px',
-        lineHeight: '1.4',
-        marginBottom: '8px',
-        wordBreak: 'break-word'
-    });
-    card.appendChild(descDiv);
-
-    // 运行时间
-    if (task.start_time && isRunning) {
-        const timeDiv = document.createElement('div');
-        const startTime = new Date(task.start_time);
-        const elapsed = Math.floor((Date.now() - startTime.getTime()) / 1000);
-        const minutes = Math.floor(elapsed / 60);
-        const seconds = elapsed % 60;
-
-        timeDiv.id = `task-time-${task.id}`;
-        timeDiv.innerHTML = `<span style="color: #999;">⏱️</span> ${minutes}:${seconds.toString().padStart(2, '0')}`;
-        Object.assign(timeDiv.style, {
-            color: '#888',
-            fontSize: '11px',
+    // === 第二行：倒计时 + 进度条（仅运行中任务） ===
+    if (isRunning) {
+        const secondRow = document.createElement('div');
+        secondRow.className = 'task-progress-row';
+        Object.assign(secondRow.style, {
             display: 'flex',
             alignItems: 'center',
-            gap: '4px'
+            gap: '8px'
         });
-        card.appendChild(timeDiv);
-    }
 
-    // 如果是运行中的任务，添加动画指示器
-    if (isRunning) {
+        // 倒计时
+        if (task.start_time) {
+            const timeSpan = document.createElement('span');
+            const startTime = new Date(task.start_time);
+            const elapsed = Math.floor((Date.now() - startTime.getTime()) / 1000);
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+
+            timeSpan.id = `task-time-${task.id}`;
+            timeSpan.textContent = `⏱️ ${minutes}:${seconds.toString().padStart(2, '0')}`;
+            Object.assign(timeSpan.style, {
+                color: 'var(--neko-popup-text-sub, #888)',
+                fontSize: '11px',
+                flexShrink: '0',
+                whiteSpace: 'nowrap'
+            });
+            secondRow.appendChild(timeSpan);
+        }
+
+        // 进度条
+        const hasDeterminateProgress = typeof task.progress === 'number' && task.progress >= 0;
         const progressBar = document.createElement('div');
         Object.assign(progressBar.style, {
-            height: '2px',
+            flex: '1',
+            height: '3px',
             background: 'var(--neko-popup-accent-bg, rgba(42, 123, 196, 0.15))',
-            borderRadius: '1px',
-            marginTop: '8px',
+            borderRadius: '2px',
             overflow: 'hidden'
         });
 
         const progressFill = document.createElement('div');
-        Object.assign(progressFill.style, {
-            height: '100%',
-            width: '30%',
-            background: 'linear-gradient(90deg, var(--neko-popup-accent, #2a7bc4), #66b5ff)',
-            borderRadius: '1px',
-            animation: 'taskProgress 1.5s ease-in-out infinite'
-        });
+        progressFill.className = 'task-progress-fill';
+        if (hasDeterminateProgress) {
+            const pct = Math.min(100, Math.max(0, Math.round(task.progress * 100)));
+            Object.assign(progressFill.style, {
+                height: '100%',
+                width: pct + '%',
+                background: 'linear-gradient(90deg, var(--neko-popup-accent, #2a7bc4), #66b5ff)',
+                borderRadius: '2px',
+                transition: 'width 0.3s ease'
+            });
+        } else {
+            Object.assign(progressFill.style, {
+                height: '100%',
+                width: '30%',
+                background: 'linear-gradient(90deg, var(--neko-popup-accent, #2a7bc4), #66b5ff)',
+                borderRadius: '2px',
+                animation: 'taskProgress 1.5s ease-in-out infinite'
+            });
+        }
         progressBar.appendChild(progressFill);
-        card.appendChild(progressBar);
+        secondRow.appendChild(progressBar);
+
+        // Step counter (e.g. "2/3") — 紧凑显示在进度条右侧
+        if (typeof task.step === 'number' && typeof task.step_total === 'number' && task.step_total > 0) {
+            const stepSpan = document.createElement('span');
+            stepSpan.className = 'task-progress-step';
+            stepSpan.textContent = `${task.step}/${task.step_total}`;
+            Object.assign(stepSpan.style, {
+                color: 'var(--neko-popup-text-sub, #999)',
+                fontSize: '10px',
+                flexShrink: '0'
+            });
+            secondRow.appendChild(stepSpan);
+        }
+
+        card.appendChild(secondRow);
     }
 
     return card;
@@ -713,7 +1246,7 @@ window.AgentHUD._setupDragging = function (hud) {
     // 鼠标按下事件 - 全局可拖动
     const handleMouseDown = (e) => {
         // 排除内部可交互元素
-        const interactiveSelectors = ['button', 'input', 'textarea', 'select', 'a', '.task-card', '#agent-task-hud-minimize', '.collapse-button'];
+        const interactiveSelectors = ['button', 'input', 'textarea', 'select', 'a', '.task-card', '#agent-task-hud-minimize', '#agent-task-hud-cancel', '.task-card-cancel', '.collapse-button'];
         const isInteractive = e.target.closest(interactiveSelectors.join(','));
 
         if (isInteractive) return;
@@ -754,7 +1287,7 @@ window.AgentHUD._setupDragging = function (hud) {
 
         // 恢复视觉状态
         hud.style.cursor = 'move';
-        hud.style.boxShadow = '0 2px 4px rgba(0,0,0,0.04), 0 8px 16px rgba(0,0,0,0.08), 0 16px 32px rgba(0,0,0,0.04)';
+        hud.style.boxShadow = 'var(--neko-popup-shadow, 0 2px 4px rgba(0,0,0,0.04), 0 8px 16px rgba(0,0,0,0.08), 0 16px 32px rgba(0,0,0,0.04))';
         hud.style.opacity = '1';
         hud.style.transition = 'opacity 0.3s ease, transform 0.3s ease, box-shadow 0.2s ease, width 0.3s ease, padding 0.3s ease, max-height 0.3s ease';
 
@@ -811,13 +1344,11 @@ window.AgentHUD._setupDragging = function (hud) {
 
     // 触摸事件支持（移动设备）- 全局拖拽
     let touchDragging = false;
-    let touchOffsetX = 0;
-    let touchOffsetY = 0;
 
     // 触摸开始
     const handleTouchStart = (e) => {
         // 排除内部可交互元素
-        const interactiveSelectors = ['button', 'input', 'textarea', 'select', 'a', '.task-card', '#agent-task-hud-minimize', '.collapse-button'];
+        const interactiveSelectors = ['button', 'input', 'textarea', 'select', 'a', '.task-card', '#agent-task-hud-minimize', '#agent-task-hud-cancel', '.task-card-cancel', '.collapse-button'];
         const isInteractive = e.target.closest(interactiveSelectors.join(','));
 
         if (isInteractive) return;
@@ -857,7 +1388,7 @@ window.AgentHUD._setupDragging = function (hud) {
         isDragging = false;  // 确保performDrag函数停止工作
 
         // 恢复视觉状态
-        hud.style.boxShadow = '0 2px 4px rgba(0,0,0,0.04), 0 8px 16px rgba(0,0,0,0.08), 0 16px 32px rgba(0,0,0,0.04)';
+        hud.style.boxShadow = 'var(--neko-popup-shadow, 0 2px 4px rgba(0,0,0,0.04), 0 8px 16px rgba(0,0,0,0.08), 0 16px 32px rgba(0,0,0,0.04))';
         hud.style.opacity = '1';
         hud.style.transition = 'opacity 0.3s ease, transform 0.3s ease, box-shadow 0.2s ease, width 0.3s ease, padding 0.3s ease, max-height 0.3s ease';
 
@@ -1038,12 +1569,31 @@ window.AgentHUD._setupDragging = function (hud) {
             transform: translateX(-2px);
         }
         
+        .task-card-cancel:hover {
+            background: rgba(220, 53, 69, 0.15) !important;
+            color: #dc3545 !important;
+            transform: scale(1.15);
+        }
+        
+        .task-card-cancel:active {
+            transform: scale(0.9);
+        }
+        
         #agent-task-hud-minimize:hover {
             background: rgba(68, 183, 254, 0.25);
             transform: scale(1.1);
         }
         
         #agent-task-hud-minimize:active {
+            transform: scale(0.95);
+        }
+        
+        #agent-task-hud-cancel:hover {
+            background: rgba(220, 53, 69, 0.25);
+            transform: scale(1.1);
+        }
+        
+        #agent-task-hud-cancel:active {
             transform: scale(0.95);
         }
         

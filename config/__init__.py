@@ -2,21 +2,148 @@
 """config 包对外暴露的配置常量。"""
 
 from copy import deepcopy
+import json
 import logging
 import os
+import platform
 import uuid
 from types import MappingProxyType
 
-from config.prompts_chara import lanlan_prompt
-
-logger = logging.getLogger(__name__)
+from config.prompts_chara import lanlan_prompt, get_lanlan_prompt, is_default_prompt
 
 # 应用程序名称配置
 APP_NAME = "N.E.K.O"
+logger = logging.getLogger(f"{APP_NAME}.{__name__}")
+
+# GPT-SoVITS voice_id 前缀(角色管理中使用 "gsv:<voice_id>" 格式标识 GPT-SoVITS 声音)
+GSV_VOICE_PREFIX = "gsv:"
+
+# 角色档案保留字段（统一管理）
+# - system: 由系统指定功能维护，不允许通用角色编辑接口直接修改
+# - workshop: 创意工坊导入/发布流程专用，不应从外部角色卡直接透传
+CHARACTER_SYSTEM_RESERVED_FIELDS = (
+    "_reserved",
+    "live2d",
+    "voice_id",
+    "system_prompt",
+    "model_type",
+    "vrm",
+    "vrm_animation",
+    "lighting",
+    "vrm_rotation",
+    "live2d_item_id",
+    "item_id",
+    "idleAnimation",
+    "mmd",
+    "mmd_animation",
+    "mmd_idle_animation",
+    "touch_set",
+)
+
+CHARACTER_WORKSHOP_RESERVED_FIELDS = (
+    "原始数据",
+    "文件路径",
+    "创意工坊物品ID",
+    "description",
+    "tags",
+    "name",
+    "描述",
+    "标签",
+    "关键词",
+)
+
+CHARACTER_RESERVED_FIELDS = tuple(
+    dict.fromkeys((*CHARACTER_SYSTEM_RESERVED_FIELDS, *CHARACTER_WORKSHOP_RESERVED_FIELDS))
+)
+
+
+def get_character_reserved_fields() -> tuple[str, ...]:
+    """返回角色档案保留字段（去重后、有序）。"""
+    return CHARACTER_RESERVED_FIELDS
+
+
+# 角色保留字段 schema（v2）
+# 所有系统保留字段统一收口到 `_reserved`，并按 avatar/live2d/vrm 分层。
+RESERVED_FIELD_SCHEMA = {
+    "voice_id": str,
+    "system_prompt": str,
+    "avatar": {
+        "model_type": str,
+        "asset_source": str,
+        "asset_source_id": str,
+        "live2d": {
+            "model_path": str,
+        },
+        "vrm": {
+            "model_path": str,
+            "animation": (str, dict, list, type(None)),
+            "idle_animation": str,
+            "lighting": (dict, type(None)),
+            "cursor_follow": (dict, type(None)),
+        },
+        "mmd": {
+            "model_path": str,
+            "animation": (str, dict, list, type(None)),
+            "idle_animation": str,
+            "lighting": (dict, type(None)),
+            "rendering": (dict, type(None)),
+            "physics": (dict, type(None)),
+            "cursor_follow": (dict, type(None)),
+        },
+    },
+}
+
+# 兼容迁移映射：旧平铺字段 -> _reserved 路径
+# 注意：rotation / camera_position / position / scale / viewport / display 保持本地偏好存储，
+# 不迁移到 characters.json。
+LEGACY_FLAT_TO_RESERVED = {
+    "voice_id": ("voice_id",),
+    "system_prompt": ("system_prompt",),
+    "model_type": ("avatar", "model_type"),
+    "live2d_item_id": ("avatar", "asset_source_id"),
+    "item_id": ("avatar", "asset_source_id"),
+    "live2d": ("avatar", "live2d", "model_path"),
+    "vrm": ("avatar", "vrm", "model_path"),
+    "vrm_animation": ("avatar", "vrm", "animation"),
+    "idleAnimation": ("avatar", "vrm", "idle_animation"),
+    "lighting": ("avatar", "vrm", "lighting"),
+    "mmd": ("avatar", "mmd", "model_path"),
+    "mmd_animation": ("avatar", "mmd", "animation"),
+    "mmd_idle_animation": ("avatar", "mmd", "idle_animation"),
+}
+
+# 从 Electron userData 目录读取端口覆盖配置（由前端端口设置窗口写入）
+def _read_port_overrides() -> dict:
+    try:
+        system = platform.system()
+        if system == "Windows":
+            appdata = os.environ.get("APPDATA") or os.path.join(
+                os.path.expanduser("~"), "AppData", "Roaming"
+            )
+            base = os.path.join(appdata, "N.E.K.O")
+        elif system == "Darwin":
+            base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "N.E.K.O")
+        else:
+            base = os.path.join(
+                os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+                "N.E.K.O",
+            )
+        port_file = os.path.join(base, "port_config.json")
+        if os.path.exists(port_file):
+            with open(port_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.debug("Failed to read port_config.json: %s", e, exc_info=True)
+    return {}
+
+
+_PORT_FILE_OVERRIDES = _read_port_overrides()
+
 
 # 运行时端口覆盖支持：
 # - 首选键：NEKO_<PORT_NAME>
 # - 兼容键：<PORT_NAME>
+# - 回退：Electron 前端写入的 port_config.json
 def _read_port_env(port_name: str, default: int) -> int:
     for key in (f"NEKO_{port_name}", port_name):
         raw = os.getenv(key)
@@ -28,6 +155,18 @@ def _read_port_env(port_name: str, default: int) -> int:
                 return value
         except Exception:
             continue
+    # 回退：从 Electron 前端写入的 port_config.json 读取
+    override = _PORT_FILE_OVERRIDES.get(port_name)
+    if override is not None:
+        try:
+            value = int(override)
+            if 1 <= value <= 65535:
+                return value
+        except (TypeError, ValueError) as e:
+            logger.warning(
+                "Invalid port_config.json override for %s=%r: %s",
+                port_name, override, e,
+            )
     return default
 
 # 服务器端口配置
@@ -39,6 +178,10 @@ TOOL_SERVER_PORT = _read_port_env("TOOL_SERVER_PORT", 48915)
 USER_PLUGIN_SERVER_PORT = _read_port_env("USER_PLUGIN_SERVER_PORT", 48916)
 AGENT_MQ_PORT = _read_port_env("AGENT_MQ_PORT", 48917)
 MAIN_AGENT_EVENT_PORT = _read_port_env("MAIN_AGENT_EVENT_PORT", 48918)
+
+# OpenFang Agent 执行后端端口 (由 Electron 并行启动，端口写入 port_config.json)
+OPENFANG_PORT = _read_port_env("OPENFANG_PORT", 50051)
+OPENFANG_BASE_URL = f"http://127.0.0.1:{OPENFANG_PORT}"
 
 # 实例 ID：同一次启动的所有服务共享。
 # launcher 会在拉起子进程前写入 NEKO_INSTANCE_ID 环境变量。
@@ -125,9 +268,29 @@ DEFAULT_LANLAN_TEMPLATE = {
         "性别": "女",
         "年龄": 15,
         "昵称": "T酱, 小T",
-        "live2d": "mao_pro",
-        "voice_id": "",
-        "system_prompt": lanlan_prompt,
+        "_reserved": {
+            "voice_id": "",
+            "system_prompt": lanlan_prompt,
+            "avatar": {
+                "model_type": "live2d",
+                "asset_source": "local",
+                "asset_source_id": "",
+                "live2d": {
+                    "model_path": "mao_pro/mao_pro.model3.json",
+                },
+                "vrm": {
+                    "model_path": "",
+                    "animation": None,
+                    "idle_animation": "",
+                    "lighting": None,
+                },
+                "mmd": {
+                    "model_path": "",
+                    "animation": None,
+                    "idle_animation": "",
+                },
+            },
+        },
     }
 }
 
@@ -137,7 +300,9 @@ _DEFAULT_VRM_LIGHTING_MUTABLE = {
     "fill": 0.5,     # 补光强度
     "rim": 0.8,      # 轮廓光强度
     "top": 0.3,      # 顶光强度
-    "bottom": 0.15   # 底光强度
+    "bottom": 0.15,  # 底光强度
+    "exposure": 0.0, # 曝光值
+    "toneMapping": 0 # 色调映射类型
 }
 
 DEFAULT_VRM_LIGHTING = MappingProxyType(_DEFAULT_VRM_LIGHTING_MUTABLE)
@@ -148,13 +313,82 @@ VRM_LIGHTING_RANGES = {
     'fill': (0, 1.0),
     'rim': (0, 1.5),
     'top': (0, 1.0),
-    'bottom': (0, 0.5)
+    'bottom': (0, 0.5),
+    'exposure': (-10.0, 10.0),
+    'toneMapping': (0, 5),
 }
 
 
 def get_default_vrm_lighting() -> dict[str, float]:
     """获取默认VRM打光配置的副本"""
     return dict(DEFAULT_VRM_LIGHTING)
+
+
+# ─── MMD 默认设置 ───
+_DEFAULT_MMD_LIGHTING_MUTABLE = {
+    "ambientIntensity": 3.0,
+    "ambientColor": "#aaaaaa",
+    "directionalIntensity": 2.0,
+    "directionalColor": "#ffffff",
+}
+
+DEFAULT_MMD_LIGHTING = MappingProxyType(_DEFAULT_MMD_LIGHTING_MUTABLE)
+
+MMD_LIGHTING_RANGES = {
+    "ambientIntensity": (0, 10.0),
+    "directionalIntensity": (0, 10.0),
+}
+
+_DEFAULT_MMD_RENDERING_MUTABLE = {
+    "toneMapping": 0,
+    "exposure": 1.0,
+    "outline": True,
+    "pixelRatio": 0,
+}
+
+DEFAULT_MMD_RENDERING = MappingProxyType(_DEFAULT_MMD_RENDERING_MUTABLE)
+
+MMD_RENDERING_RANGES = {
+    "toneMapping": (0, 7),
+    "exposure": (0, 5.0),
+    "pixelRatio": (0, 2.0),
+}
+
+_DEFAULT_MMD_PHYSICS_MUTABLE = {
+    "enabled": True,
+    "strength": 1.0,
+}
+
+DEFAULT_MMD_PHYSICS = MappingProxyType(_DEFAULT_MMD_PHYSICS_MUTABLE)
+
+MMD_PHYSICS_RANGES = {
+    "strength": (0.1, 2.0),
+}
+
+_DEFAULT_MMD_CURSOR_FOLLOW_MUTABLE = {
+    "enabled": True,
+    "headYaw": 30,
+    "headPitch": 20,
+    "smoothSpeed": 3.0,
+}
+
+DEFAULT_MMD_CURSOR_FOLLOW = MappingProxyType(_DEFAULT_MMD_CURSOR_FOLLOW_MUTABLE)
+
+MMD_CURSOR_FOLLOW_RANGES = {
+    "headYaw": (10, 50),
+    "headPitch": (5, 30),
+    "smoothSpeed": (1.0, 8.0),
+}
+
+
+def get_default_mmd_settings() -> dict:
+    """获取默认MMD设置的副本"""
+    return {
+        "lighting": dict(DEFAULT_MMD_LIGHTING),
+        "rendering": dict(DEFAULT_MMD_RENDERING),
+        "physics": dict(DEFAULT_MMD_PHYSICS),
+        "cursor_follow": dict(DEFAULT_MMD_CURSOR_FOLLOW),
+    }
 
 DEFAULT_CHARACTERS_CONFIG = {
     "主人": deepcopy(DEFAULT_MASTER_TEMPLATE),
@@ -272,10 +506,15 @@ DEFAULT_CORE_CONFIG = {
     "assistApiKeyStep": "",
     "assistApiKeySilicon": "",
     "assistApiKeyGemini": "",
+    "assistApiKeyMinimax": "",
     "mcpToken": "",
     "agentModelUrl": "",
     "agentModelId": "",
     "agentModelApiKey": "",
+    "openclawUrl": "http://127.0.0.1:8089",
+    "openclawTimeout": 300.0,
+    "openclawDefaultSenderId": "neko_user",
+    "textGuardMaxLength": 300,
 }
 
 DEFAULT_USER_PREFERENCES = []
@@ -398,6 +637,7 @@ DEFAULT_ASSIST_API_KEY_FIELDS = {
     'silicon': 'ASSIST_API_KEY_SILICON',
     'gemini': 'ASSIST_API_KEY_GEMINI',
     'kimi': 'ASSIST_API_KEY_KIMI',
+    'minimax': 'ASSIST_API_KEY_MINIMAX',
 }
 
 DEFAULT_CONFIG_DATA = {
@@ -412,75 +652,46 @@ TIME_ORIGINAL_TABLE_NAME = "time_indexed_original"
 TIME_COMPRESSED_TABLE_NAME = "time_indexed_compressed"
 
 
-# 不同模型供应商需要的 extra_body 格式
-EXTRA_BODY_OPENAI = {"enable_thinking": False}
-EXTRA_BODY_CLAUDE = {"thinking": {"type": "disabled"}}
-EXTRA_BODY_GEMINI = {"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}}
-EXTRA_BODY_GEMINI_3 = {"extra_body": {"google": {"thinking_config": {"thinking_level": "low", "include_thoughts": False}}}}
-
-# Agent 调用统一开关：是否加载 extra_body。
-# 默认开启，配合 MODELS_EXTRA_BODY_MAP 实现默认关闭 thinking。
-AGENT_USE_EXTRA_BODY = True
-
-# 模型到 extra_body 的映射
-MODELS_EXTRA_BODY_MAP = {
-    # Qwen 系列
-    "qwen-flash": EXTRA_BODY_OPENAI,
-    "qwen3-vl-plus-2025-09-23": EXTRA_BODY_OPENAI,
-    "qwen3-vl-plus": EXTRA_BODY_OPENAI,
-    "qwen3-vl-flash": EXTRA_BODY_OPENAI,
-    "qwen3.5-plus": EXTRA_BODY_OPENAI,
-    "qwen-plus": EXTRA_BODY_OPENAI,
-    "deepseek-ai/DeepSeek-V3.2": EXTRA_BODY_OPENAI,
-    # GLM 系列
-    "glm-4.5-air": EXTRA_BODY_CLAUDE,
-    "glm-4.6v-flash": EXTRA_BODY_CLAUDE,
-    "glm-4.7-flash": EXTRA_BODY_CLAUDE,
-    "glm-4.6v": EXTRA_BODY_CLAUDE,
-    # Silicon (zai-org) - 使用 Qwen 格式
-    "zai-org/GLM-4.6V": EXTRA_BODY_OPENAI,
-    # "free-model": {"tools":[{"type": "web_search", "function": {"description": "这个web_search用来搜索互联网的信息"}}]},
-    "step-2-mini": {"tools":[{"type": "web_search", "function": {"description": "这个web_search用来搜索互联网的信息"}}]},
-    # Gemini 系列
-    "gemini-2.5-flash": EXTRA_BODY_GEMINI,  # 禁用 thinking
-    "gemini-2.5-flash-lite": EXTRA_BODY_GEMINI,  # 禁用 thinking
-    "gemini-3-flash-preview": EXTRA_BODY_GEMINI_3,  # 低级别 thinking
-}
-
-
-def get_extra_body(model: str) -> dict | None:
-    """根据模型名称返回对应的 extra_body 配置。
-
-    Args:
-        model: 模型名称
-
-    Returns:
-        对应的 extra_body dict，如果模型不需要特殊配置则返回 None
-    """
-    if not model:
-        return None
-    if model in MODELS_EXTRA_BODY_MAP:
-        return MODELS_EXTRA_BODY_MAP[model]
-    return {}
-
-
-def get_agent_extra_body(model: str) -> dict | None:
-    """Return extra_body for Agent calls based on a single global switch."""
-    if not AGENT_USE_EXTRA_BODY:
-        return None
-    return get_extra_body(model)
+# Provider 相关配置已统一迁移至 config.providers, 此处仅 re-export 保持向后兼容
+from config.providers import (  # noqa: E402, F401
+    EXTRA_BODY_OPENAI,
+    EXTRA_BODY_CLAUDE,
+    EXTRA_BODY_GEMINI,
+    AGENT_USE_EXTRA_BODY,
+    MODELS_EXTRA_BODY_MAP,
+    get_extra_body,
+    get_agent_extra_body,
+)
 
 
 __all__ = [
     'APP_NAME',
+    'GSV_VOICE_PREFIX',
+    'CHARACTER_SYSTEM_RESERVED_FIELDS',
+    'CHARACTER_WORKSHOP_RESERVED_FIELDS',
+    'CHARACTER_RESERVED_FIELDS',
+    'RESERVED_FIELD_SCHEMA',
+    'LEGACY_FLAT_TO_RESERVED',
+    'get_character_reserved_fields',
     'CONFIG_FILES',
     'DEFAULT_MASTER_TEMPLATE',
     'DEFAULT_LANLAN_TEMPLATE',
     'DEFAULT_VRM_LIGHTING',
     'VRM_LIGHTING_RANGES',
     'get_default_vrm_lighting',
+    'DEFAULT_MMD_LIGHTING',
+    'MMD_LIGHTING_RANGES',
+    'DEFAULT_MMD_RENDERING',
+    'MMD_RENDERING_RANGES',
+    'DEFAULT_MMD_PHYSICS',
+    'MMD_PHYSICS_RANGES',
+    'DEFAULT_MMD_CURSOR_FOLLOW',
+    'MMD_CURSOR_FOLLOW_RANGES',
+    'get_default_mmd_settings',
     'DEFAULT_CHARACTERS_CONFIG',
     'get_localized_default_characters',
+    'get_lanlan_prompt',
+    'is_default_prompt',
     'DEFAULT_CORE_CONFIG',
     'DEFAULT_USER_PREFERENCES',
     'DEFAULT_VOICE_STORAGE',
@@ -555,5 +766,7 @@ __all__ = [
     'DEFAULT_TTS_MODEL_API_KEY',
     'DEFAULT_AGENT_MODEL_URL',
     'DEFAULT_AGENT_MODEL_API_KEY',
+    # OpenFang
+    'OPENFANG_PORT',
+    'OPENFANG_BASE_URL',
 ]
-

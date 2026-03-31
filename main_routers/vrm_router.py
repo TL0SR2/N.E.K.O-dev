@@ -10,7 +10,6 @@ Handles VRM model-related endpoints including:
 """
 
 import json
-import logging
 import re
 from pathlib import Path
 
@@ -18,9 +17,11 @@ from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from .shared_state import get_config_manager
+from utils.file_utils import atomic_write_json
+from utils.logger_config import get_module_logger
 
 router = APIRouter(prefix="/api/model/vrm", tags=["vrm"])
-logger = logging.getLogger("Main")
+logger = get_module_logger(__name__, "Main")
 
 # VRM 模型路径常量
 VRM_USER_PATH = "/user_vrm"  
@@ -223,6 +224,7 @@ def get_vrm_models():
                 models.append({
                         "name": vrm_file.stem,
                         "filename": vrm_file.name,
+                        "path": url,
                         "url": url,
                         "type": "vrm",
                         "size": vrm_file.stat().st_size,
@@ -243,6 +245,7 @@ def get_vrm_models():
                 models.append({
                         "name": vrm_file.stem,
                         "filename": vrm_file.name,
+                        "path": url,
                         "url": url,
                         "type": "vrm",
                         "size": vrm_file.stat().st_size,
@@ -401,6 +404,46 @@ def get_vrm_animations():
         )
 
 
+@router.delete('/model')
+async def delete_vrm_model(request: Request):
+    """删除用户导入的 VRM 模型文件"""
+    try:
+        body = await request.json()
+        url = body.get('url', '')
+        if not url or not isinstance(url, str):
+            return JSONResponse(status_code=400, content={"success": False, "error": "缺少 url 参数"})
+
+        # 只允许删除 /user_vrm/ 下的文件
+        if not url.startswith(VRM_USER_PATH + '/'):
+            return JSONResponse(status_code=400, content={"success": False, "error": "只能删除用户导入的 VRM 模型"})
+
+        rel = url[len(VRM_USER_PATH) + 1:]  # 去掉 '/user_vrm/'
+        if not rel or '..' in rel or rel.startswith('/'):
+            return JSONResponse(status_code=400, content={"success": False, "error": "无效的模型路径"})
+
+        # 只允许删除顶层 .vrm 文件
+        if Path(rel).name != rel or not rel.lower().endswith('.vrm'):
+            return JSONResponse(status_code=400, content={"success": False, "error": "无效的模型路径"})
+
+        config_mgr = get_config_manager()
+        vrm_dir = config_mgr.vrm_dir
+        target = (vrm_dir / rel).resolve()
+
+        if not target.is_relative_to(vrm_dir.resolve()):
+            return JSONResponse(status_code=400, content={"success": False, "error": "路径越界"})
+
+        if not target.is_file():
+            return JSONResponse(status_code=404, content={"success": False, "error": "模型文件不存在"})
+
+        target.unlink()
+        logger.info(f"已删除 VRM 模型: {target.name}")
+
+        return JSONResponse(content={"success": True, "message": f"VRM 模型 {target.stem} 已删除"})
+    except Exception as e:
+        logger.error(f"删除 VRM 模型失败: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+
 # 新增配置获取接口
 @router.get('/config')
 async def get_vrm_config():
@@ -430,10 +473,9 @@ DEFAULT_MOOD_MAP = {
 
 def _get_emotion_config_path(model_name: str) -> Path | None:
     """获取模型情感配置文件路径"""
-    # 允许 Unicode 单词字符（包括 CJK）、下划线、连字符
-    # \w 在 Python3 中支持 Unicode，包含字母、数字、下划线（含中日韩字符）
-    safe_name = re.sub(r'[^\w-]', '', model_name, flags=re.UNICODE)
-    if not safe_name:
+    # 允许 Unicode 单词字符、点、下划线、连字符（与 _get_model_path 保持一致）
+    safe_name = re.sub(r'[^\w.\-]', '', model_name, flags=re.UNICODE)
+    if not safe_name or safe_name != model_name:
         logger.warning(f"无效的模型名称: {model_name!r}")
         return None
 
@@ -491,6 +533,47 @@ def _get_model_path(model_name: str) -> tuple[Path | None, str]:
         return resolved, VRM_USER_PATH
 
     return None, ""
+
+
+@router.delete('/model/{model_name}')
+def delete_vrm_model(model_name: str):
+    """删除指定的用户导入 VRM 模型"""
+    try:
+        config_mgr = get_config_manager()
+        config_mgr.ensure_vrm_directory()
+        vrm_dir = config_mgr.vrm_dir
+
+        # 基本安全检查：不允许空名称或含路径分隔符
+        if not model_name or '/' in model_name or '\\' in model_name or '..' in model_name:
+            return JSONResponse(status_code=400, content={"success": False, "error": f"无效的模型名称: {model_name!r}"})
+
+        # safe_vrm_path 已做完整的路径穿越防护
+        vrm_path, err = safe_vrm_path(vrm_dir, f"{model_name}.vrm")
+        if vrm_path is None:
+            return JSONResponse(status_code=400, content={"success": False, "error": err})
+
+        # 只允许删除用户目录下的 VRM 模型
+        if not vrm_path.is_file():
+            return JSONResponse(status_code=404, content={"success": False, "error": f"未在用户目录中找到模型 {model_name}，可能是内置模型，无法删除"})
+
+        vrm_path.unlink()
+
+        # 同时删除关联的情感映射配置（仅当没有同名内置模型时）
+        emotion_config = _get_emotion_config_path(model_name)
+        if emotion_config and emotion_config.is_file():
+            # 检查内置目录是否存在同名 VRM，避免删除共享配置
+            builtin_vrm = config_mgr.project_root / "static" / "vrm" / f"{model_name}.vrm"
+            if not builtin_vrm.is_file():
+                try:
+                    emotion_config.unlink()
+                except Exception as e:
+                    logger.warning(f"删除情感映射配置失败: {e}")
+
+        logger.info(f"已删除VRM模型: {model_name}")
+        return {"success": True, "message": f"模型 {model_name} 已成功删除"}
+    except Exception as e:
+        logger.error(f"删除VRM模型失败: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
 
 
 @router.get('/emotion_mapping/{model_name}')
@@ -586,8 +669,7 @@ async def update_emotion_mapping(model_name: str, request: Request):
                 content={"success": False, "error": "无法创建配置目录"}
             )
 
-        with open(config_path, 'w', encoding='utf-8') as f:
-            json.dump(normalized_data, f, ensure_ascii=False, indent=2)
+        atomic_write_json(config_path, normalized_data, ensure_ascii=False, indent=2)
 
         logger.info(f"已保存VRM模型 {model_name} 的情感映射配置")
 

@@ -151,6 +151,7 @@ class VRMInteraction {
 
         // 1. 鼠标按下
         this.mouseDownHandler = (e) => {
+            if (!this.manager._isModelReadyForInteraction) return;
             if (this.checkLocked()) return;
 
             // 如果正在回弹动画，优先取消，避免拖拽冲突
@@ -201,6 +202,7 @@ class VRMInteraction {
 
         // 2. 鼠标移动 (核心拖拽逻辑)
         this.dragHandler = (e) => {
+            if (!this.manager._isModelReadyForInteraction) return;
             if (this.checkLocked()) {
                 if (this.isDragging) {
                     e.preventDefault();
@@ -313,6 +315,7 @@ class VRMInteraction {
 
         // 3. 鼠标释放
         this.mouseUpHandler = async (e) => {
+            if (!this.manager._isModelReadyForInteraction) return;
             if (this.isDragging) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -338,21 +341,26 @@ class VRMInteraction {
             }
         };
 
-        // 5.5 鼠标悬停时动态更新光标（不拖拽时检测是否在模型上）
-        // 节流射线检测，避免每帧 intersectObject 造成卡顿
-        let _hoverThrottleId = null;
+        // 5.5 鼠标悬停时动态更新光标（不拖拽时检测是否在模型附近）
+        // 仅使用屏幕包围盒判断，避免高频射线检测导致掉帧
+        let _lastHoverHitTestAt = 0;
         this.mouseHoverHandler = (e) => {
             if (this.isDragging || this.checkLocked()) return;
-            if (_hoverThrottleId) return; // 节流中，跳过
-            _hoverThrottleId = requestAnimationFrame(() => {
-                _hoverThrottleId = null;
-                if (this.isDragging) return;
-                if (this._hitTestModel(e.clientX, e.clientY)) {
-                    canvas.style.cursor = 'grab';
-                } else {
-                    canvas.style.cursor = 'default';
-                }
-            });
+            const now = performance.now();
+            if ((now - _lastHoverHitTestAt) < 80) return;
+            _lastHoverHitTestAt = now;
+            if (this.isDragging) return;
+            const bounds = this._cachedScreenBounds;
+            if (!bounds) {
+                canvas.style.cursor = 'default';
+                return;
+            }
+            const padding = 10;
+            const isNearModel = e.clientX >= (bounds.minX - padding) &&
+                e.clientX <= (bounds.maxX + padding) &&
+                e.clientY >= (bounds.minY - padding) &&
+                e.clientY <= (bounds.maxY + padding);
+            canvas.style.cursor = isNearModel ? 'grab' : 'default';
         };
 
         // 6. 滚轮缩放
@@ -599,7 +607,7 @@ class VRMInteraction {
      * 计算模型包围盒在屏幕上的可见区域，只在可见像素小于阈值时才进行校正。
      * 这样无论模型放多大，只要屏幕上还能看到足够的部分，就不会强制限制位置。
      **/
-    clampModelPosition(position) {
+    clampModelPosition(position, { minVisiblePixels = 200 } = {}) {
         if (!this.manager.camera || !this.manager.renderer || !this.manager.currentModel?.vrm) {
             return position;
         }
@@ -613,8 +621,7 @@ class VRMInteraction {
         const renderer = this.manager.renderer;
         const vrm = this.manager.currentModel.vrm;
 
-        // 最小可见像素阈值（低于此值才会校正），与 Live2D 保持一致
-        const MIN_VISIBLE_PIXELS = 50;
+        const MIN_VISIBLE_PIXELS = minVisiblePixels;
 
         try {
             // 1. 临时将模型移动到目标位置，计算包围盒
@@ -645,6 +652,10 @@ class VRMInteraction {
             const screenWidth = canvasRect.width;
             const screenHeight = canvasRect.height;
 
+            // Never demand more visible pixels than the viewport can supply
+            const effectiveMinX = Math.min(MIN_VISIBLE_PIXELS, screenWidth);
+            const effectiveMinY = Math.min(MIN_VISIBLE_PIXELS, screenHeight);
+
             // 计算模型在屏幕上的边界框
             let modelMinX = Infinity, modelMaxX = -Infinity;
             let modelMinY = Infinity, modelMaxY = -Infinity;
@@ -667,39 +678,40 @@ class VRMInteraction {
 
             const visibleWidth = Math.max(0, visibleMaxX - visibleMinX);
             const visibleHeight = Math.max(0, visibleMaxY - visibleMinY);
-            const visiblePixels = visibleWidth * visibleHeight;
 
-            // 5. 如果可见区域足够大，不做任何限制
-            if (visiblePixels >= MIN_VISIBLE_PIXELS) {
+            // 5. 按线性维度判定：水平和垂直方向各自需要至少 effective minimum 可见
+            const modelOverflowsH = modelMinX < 0 || modelMaxX > screenWidth;
+            const modelOverflowsV = modelMinY < 0 || modelMaxY > screenHeight;
+            const needsClampH = modelOverflowsH && visibleWidth < effectiveMinX;
+            const needsClampV = modelOverflowsV && visibleHeight < effectiveMinY;
+
+            if (!needsClampH && !needsClampV) {
                 return position;
             }
 
             // 6. 可见区域太小，需要将模型拉回
-            // 计算需要移动的方向和距离，使模型至少有 MIN_VISIBLE_PIXELS 可见
             const modelCenterX = (modelMinX + modelMaxX) / 2;
             const modelCenterY = (modelMinY + modelMaxY) / 2;
             const screenCenterX = screenWidth / 2;
             const screenCenterY = screenHeight / 2;
 
-            // 计算需要移动的屏幕像素
+            // 仅校正需要拉回的维度
             let moveX = 0, moveY = 0;
 
-            // 如果模型完全在屏幕左侧外
-            if (modelMaxX < MIN_VISIBLE_PIXELS) {
-                moveX = MIN_VISIBLE_PIXELS - modelMaxX;
-            }
-            // 如果模型完全在屏幕右侧外
-            else if (modelMinX > screenWidth - MIN_VISIBLE_PIXELS) {
-                moveX = (screenWidth - MIN_VISIBLE_PIXELS) - modelMinX;
+            if (needsClampH) {
+                if (modelMaxX < effectiveMinX) {
+                    moveX = effectiveMinX - modelMaxX;
+                } else if (modelMinX > screenWidth - effectiveMinX) {
+                    moveX = (screenWidth - effectiveMinX) - modelMinX;
+                }
             }
 
-            // 如果模型完全在屏幕上方外
-            if (modelMaxY < MIN_VISIBLE_PIXELS) {
-                moveY = MIN_VISIBLE_PIXELS - modelMaxY;
-            }
-            // 如果模型完全在屏幕下方外
-            else if (modelMinY > screenHeight - MIN_VISIBLE_PIXELS) {
-                moveY = (screenHeight - MIN_VISIBLE_PIXELS) - modelMinY;
+            if (needsClampV) {
+                if (modelMaxY < effectiveMinY) {
+                    moveY = effectiveMinY - modelMaxY;
+                } else if (modelMinY > screenHeight - effectiveMinY) {
+                    moveY = (screenHeight - effectiveMinY) - modelMinY;
+                }
             }
 
             // 7. 将屏幕像素移动距离转换为世界空间距离
@@ -916,22 +928,38 @@ class VRMInteraction {
 
         const canvas = this.manager.renderer.domElement;
         const useUiLoopVisibility = () => typeof this.manager._shouldShowVrmLockIcon === 'function';
-        const threshold = 150;
+        const getModelThreshold = () => {
+            const modelHeight = Math.max(0, Number(this._vrmModelScreenHeight) || 0);
+            return Math.max(120, Math.min(320, modelHeight > 0 ? modelHeight * 0.6 : 180));
+        };
         const hoverFadeThreshold = 60;
 
         // Ctrl+锁定+近距离 → 容器变淡（与 Live2D 侧 setLockedHoverFade 对齐）
         // 注意：vrm-core.js init 时设置了 container.style.opacity='1'（内联样式），
         // CSS class 优先级低于内联样式，因此必须直接操作 style.opacity 才能生效
         const vrmContainer = document.getElementById('vrm-container');
-        let lockedHoverFadeActive = false;
+        let ctrlFadeActive = false;      // Ctrl 按住淡化
+        let stationaryFadeActive = false; // 静止1秒淡化
         let isCtrlPressed = false;
-        const setLockedHoverFade = (shouldFade) => {
+
+        // 静止自动淡化：鼠标在模型范围内静止1秒后自动淡化
+        this._vrmStationaryFadeTimer = null;
+        this._vrmHasEnteredHoverRange = false; // 是否已进入过模型范围
+        const STATIONARY_FADE_DELAY = 1000;
+
+        const clearStationaryFadeTimer = () => {
+            if (this._vrmStationaryFadeTimer !== null) {
+                clearTimeout(this._vrmStationaryFadeTimer);
+                this._vrmStationaryFadeTimer = null;
+            }
+        };
+
+        const applyFade = (forceFade) => {
             if (!vrmContainer) return;
-            if (lockedHoverFadeActive === shouldFade) return;
-            lockedHoverFadeActive = shouldFade;
+            const shouldFade = forceFade !== undefined ? forceFade : (ctrlFadeActive || stationaryFadeActive);
             vrmContainer.style.opacity = shouldFade ? '0.12' : '1';
         };
-        this._setLockedHoverFade = setLockedHoverFade;
+        this._setLockedHoverFade = applyFade;
 
         // 初始化缓存
         this.updateModelBoundsCache();
@@ -991,6 +1019,76 @@ class VRMInteraction {
             return Math.sqrt(dx * dx + dy * dy);
         };
 
+        const collectUiRects = () => {
+            const rects = [];
+            const pushRect = (el) => {
+                if (!el) return;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
+                const rect = el.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return;
+                rects.push(rect);
+            };
+
+            pushRect(document.getElementById('vrm-floating-buttons'));
+            pushRect(document.getElementById('vrm-lock-icon'));
+
+            return rects;
+        };
+
+        const isPointNearRect = (x, y, rect, padding = 16) => {
+            return x >= rect.left - padding &&
+                x <= rect.right + padding &&
+                y >= rect.top - padding &&
+                y <= rect.bottom + padding;
+        };
+
+        const isPointerNearUi = (mouseX, mouseY) => {
+            const uiRects = collectUiRects();
+            if (!uiRects.length) return false;
+            return uiRects.some((rect) => isPointNearRect(mouseX, mouseY, rect, 16));
+        };
+
+        const isPointerInTransitCorridor = (mouseX, mouseY) => {
+            const currentButtonsContainer = document.getElementById('vrm-floating-buttons');
+            if (!currentButtonsContainer) return false;
+            if (currentButtonsContainer.style.display !== 'flex') return false;
+            if (!this._cachedScreenBounds) return false;
+
+            const { minX, maxX, minY, maxY } = this._cachedScreenBounds;
+            const modelCenterX = (minX + maxX) / 2;
+            const modelCenterY = (minY + maxY) / 2;
+            const btnRect = currentButtonsContainer.getBoundingClientRect();
+            const uiCenterX = (btnRect.left + btnRect.right) / 2;
+            const uiCenterY = (btnRect.top + btnRect.bottom) / 2;
+
+            const vx = uiCenterX - modelCenterX;
+            const vy = uiCenterY - modelCenterY;
+            const vLenSq = vx * vx + vy * vy;
+            if (vLenSq < 1) return false;
+
+            // Point-to-segment distance with a slightly expanded corridor.
+            const wx = mouseX - modelCenterX;
+            const wy = mouseY - modelCenterY;
+            let t = (wx * vx + wy * vy) / vLenSq;
+            t = Math.max(-0.08, Math.min(1.08, t));
+            const projX = modelCenterX + t * vx;
+            const projY = modelCenterY + t * vy;
+            const dx = mouseX - projX;
+            const dy = mouseY - projY;
+
+            const corridorWidth = Math.max(26, Math.min(64, Math.hypot(btnRect.width, btnRect.height) * 0.18));
+            return (dx * dx + dy * dy) <= corridorWidth * corridorWidth;
+        };
+
+        const shouldKeepUiVisible = (mouseX, mouseY, distanceToModel) => {
+            const threshold = getModelThreshold();
+            if (distanceToModel < threshold) return true;
+            if (isPointerNearUi(mouseX, mouseY)) return true;
+            if (isPointerInTransitCorridor(mouseX, mouseY)) return true;
+            return false;
+        };
+
         // 辅助函数：启动隐藏定时器（简化版本，使用缓存）
         const startHideTimer = (delay = 1000) => {
             if (this.checkLocked()) return;
@@ -1023,7 +1121,7 @@ class VRMInteraction {
                 const mouseY = this._lastMouseY || 0;
                 const distance = calculateDistanceToModel(mouseX, mouseY);
 
-                if (distance < threshold) {
+                if (shouldKeepUiVisible(mouseX, mouseY, distance)) {
                     // 鼠标仍在模型附近，重新启动定时器
                     this._hideButtonsTimer = null;
                     startHideTimer(delay);
@@ -1062,7 +1160,7 @@ class VRMInteraction {
 
             // 更新缓存（如果模型已更新）
             const now = Date.now();
-            if (!this._cachedScreenBounds || (now - this._lastModelUpdateTime) > 100) {
+            if (!this._cachedScreenBounds || (now - this._lastModelUpdateTime) > 250) {
                 this.updateModelBoundsCache();
             }
 
@@ -1090,7 +1188,7 @@ class VRMInteraction {
 
             // 如果鼠标在按钮或锁图标上，不变淡，直接显示
             if (isOverButtons || isOverLock) {
-                setLockedHoverFade(false);
+                applyFade(false);
                 showButtons();
                 return;
             }
@@ -1098,15 +1196,42 @@ class VRMInteraction {
             // 使用缓存计算距离（避免重复的 Box3 计算）
             const distance = calculateDistanceToModel(mouseX, mouseY);
 
-            // 锁定 + Ctrl + 鼠标在模型附近 → 变淡（与 Live2D 侧逻辑一致）
+            // 静止自动淡化：锁定 + 鼠标在模型附近 + 静止超过1秒 → 变淡
+            // Ctrl 按住淡化：锁定 + Ctrl + 鼠标在模型附近 → 变淡
             const ctrlKeyPressed = isCtrlPressed;
-            const shouldFade = this.checkLocked() && ctrlKeyPressed && distance < hoverFadeThreshold;
-            setLockedHoverFade(shouldFade);
+            const isNearModel = distance < hoverFadeThreshold;
+
+            // 静止时启动定时器，移出范围时清除
+            if (this.checkLocked() && isNearModel) {
+                // 首次进入范围：设置标志并启动定时器
+                if (!this._vrmHasEnteredHoverRange) {
+                    this._vrmHasEnteredHoverRange = true;
+                    if (this._vrmStationaryFadeTimer === null && !stationaryFadeActive) {
+                        this._vrmStationaryFadeTimer = setTimeout(() => {
+                            stationaryFadeActive = true;
+                            applyFade();
+                        }, STATIONARY_FADE_DELAY);
+                    }
+                }
+                // 已在范围内：移动时不重启定时器
+            } else {
+                // 移出范围：清除定时器并重置标志
+                if (this._vrmStationaryFadeTimer !== null || stationaryFadeActive) {
+                    clearStationaryFadeTimer();
+                    stationaryFadeActive = false;
+                    applyFade();
+                }
+                this._vrmHasEnteredHoverRange = false;
+            }
+
+            // Ctrl 淡化：锁定 + Ctrl + 在模型范围内（独立于静止淡化）
+            ctrlFadeActive = this.checkLocked() && ctrlKeyPressed && isNearModel;
+            applyFade();
 
             // 锁定状态下不处理按钮显示/隐藏
             if (this.checkLocked()) return;
 
-            if (distance < threshold) {
+            if (shouldKeepUiVisible(mouseX, mouseY, distance)) {
                 showButtons();
             } else {
                 startHideTimer();
@@ -1114,6 +1239,7 @@ class VRMInteraction {
         };
 
         const onPointerMove = (event) => {
+            if (!this.manager._isModelReadyForInteraction) return;
             if (!this.manager.currentModel || !this.manager.currentModel.vrm) return;
             if (!this.manager.renderer || !this.manager.camera) return;
 
@@ -1143,17 +1269,21 @@ class VRMInteraction {
         const onKeyUp = (event) => {
             if (!event.ctrlKey && !event.metaKey) {
                 isCtrlPressed = false;
-                if (lockedHoverFadeActive) {
-                    setLockedHoverFade(false);
-                }
+                // Ctrl 释放时重新计算淡化状态，让 stationaryFadeActive 有机会生效
+                ctrlFadeActive = false;
+                applyFade();
             }
         };
         const onBlur = () => {
-            isCtrlPressed = false;
-            if (lockedHoverFadeActive) {
-                setLockedHoverFade(false);
+            clearStationaryFadeTimer();
+            // blur 时清除定时器和淡化状态，焦点恢复后需重新触发
+            if (stationaryFadeActive) {
+                stationaryFadeActive = false;
+                applyFade();
             }
+            this._vrmHasEnteredHoverRange = false;
         };
+        this._vrmClearStationaryFadeTimer = clearStationaryFadeTimer;
 
         // 清理旧的键盘 / blur 监听器
         if (this._vrmCtrlKeyDownListener) {
@@ -1171,8 +1301,8 @@ class VRMInteraction {
         window.addEventListener('blur', onBlur);
 
         canvas.addEventListener('mouseenter', onMouseEnter);
-        window.addEventListener('pointermove', onPointerMove);
-        window.addEventListener('mousemove', onPointerMove);
+        canvas.addEventListener('pointermove', onPointerMove);
+        canvas.addEventListener('mousemove', onPointerMove);
 
         this._vrmCtrlKeyDownListener = onKeyDown;
         this._vrmCtrlKeyUpListener = onKeyUp;
@@ -1207,8 +1337,8 @@ class VRMInteraction {
             this._floatingButtonsMouseLeave = null;
         }
         if (this._floatingButtonsPointerMove) {
-            window.removeEventListener('pointermove', this._floatingButtonsPointerMove);
-            window.removeEventListener('mousemove', this._floatingButtonsPointerMove);
+            canvas.removeEventListener('pointermove', this._floatingButtonsPointerMove);
+            canvas.removeEventListener('mousemove', this._floatingButtonsPointerMove);
             this._floatingButtonsPointerMove = null;
         }
         // 清理 Ctrl 键 / blur 监听器
@@ -1228,6 +1358,10 @@ class VRMInteraction {
         if (typeof this._setLockedHoverFade === 'function') {
             this._setLockedHoverFade(false);
             this._setLockedHoverFade = null;
+        }
+        if (this._vrmClearStationaryFadeTimer) {
+            this._vrmClearStationaryFadeTimer();
+            this._vrmClearStationaryFadeTimer = null;
         }
         if (this._hideButtonsTimer) {
             clearTimeout(this._hideButtonsTimer);

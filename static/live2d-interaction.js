@@ -5,13 +5,19 @@
 // ===== 自动吸附功能配置 =====
 const SNAP_CONFIG = {
     // 吸附阈值：模型在屏幕内剩余的像素小于此值时触发吸附（即模型绝大部分超出屏幕）
-    threshold: 50,
+    threshold: 200,
     // 吸附边距：吸附后距离屏幕边缘的最小距离
     margin: 5,
     // 动画持续时间（毫秒）
     animationDuration: 260,
     // 动画缓动函数类型
     easingType: 'easeOutBack'
+};
+
+// ===== 缩放限制配置 =====
+const SCALE_LIMITS = {
+    MIN: 0.005, // 最小缩放比例
+    MAX: 5.0     // 最大缩放比例（暂不实施，保留供后续使用）
 };
 
 // 缓动函数集合
@@ -47,7 +53,7 @@ const EasingFunctions = {
 Live2DManager.prototype._checkSnapRequired = async function (model, options = {}) {
     if (!model) return null;
 
-    const { afterDisplaySwitch = false } = options;
+    const { afterDisplaySwitch = false, threshold: customThreshold } = options;
 
     try {
         const bounds = model.getBounds();
@@ -87,7 +93,7 @@ Live2DManager.prototype._checkSnapRequired = async function (model, options = {}
         // 检查是否有任何边超出阈值
         // 新逻辑：只有当模型在屏幕内剩余的部分小于 threshold 时才触发吸附
         // 即模型绝大部分都超出屏幕时才吸附
-        const threshold = SNAP_CONFIG.threshold;
+        const threshold = customThreshold ?? SNAP_CONFIG.threshold;
         const margin = SNAP_CONFIG.margin;
 
         // 计算模型在屏幕内剩余的像素数
@@ -250,6 +256,9 @@ Live2DManager.prototype._performSnapAnimation = function (model, snapInfo) {
  * @returns {Promise<boolean>} 是否执行了吸附
  */
 Live2DManager.prototype._checkAndPerformSnap = async function (model, options = {}) {
+    if (!this._isModelReadyForInteraction && !options.allowWhenNotReady) {
+        return false;
+    }
     // 如果正在执行吸附动画，跳过
     if (this._isSnapping) {
         return false;
@@ -281,7 +290,7 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
     // this.pixi_app.stage.interactive = true;
     // this.pixi_app.stage.hitArea = this.pixi_app.screen;
 
-    let isDragging = false;
+    this._isDraggingModel = false;
     let dragStartPos = new PIXI.Point();
 
     // 点击检测相关变量
@@ -305,200 +314,17 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
         }
     };
 
-    const playTutorialMotion = async () => {
-        if (!this.currentModel || !this.currentModel.motion) {
-            return false;
-        }
 
-        const fileRefMotions = this.fileReferences && this.fileReferences.Motions;
-        let motionGroups = [];
-
-        if (fileRefMotions && typeof fileRefMotions === 'object') {
-            motionGroups = Object.keys(fileRefMotions)
-                .filter(group => Array.isArray(fileRefMotions[group]) && fileRefMotions[group].length > 0);
-        }
-
-        if (motionGroups.length === 0 &&
-            this.currentModel.internalModel &&
-            this.currentModel.internalModel.motionManager &&
-            this.currentModel.internalModel.motionManager.definitions) {
-            const defs = this.currentModel.internalModel.motionManager.definitions;
-            motionGroups = Object.keys(defs)
-                .filter(group => Array.isArray(defs[group]) && defs[group].length > 0);
-        }
-
-        if (motionGroups.length === 0) {
-            return false;
-        }
-
-        const group = this.getRandomElement(motionGroups);
-        if (!group) return false;
-
-        const groupList =
-            (fileRefMotions && fileRefMotions[group]) ||
-            (this.currentModel.internalModel &&
-                this.currentModel.internalModel.motionManager &&
-                this.currentModel.internalModel.motionManager.definitions &&
-                this.currentModel.internalModel.motionManager.definitions[group]) ||
-            [];
-
-        if (!Array.isArray(groupList) || groupList.length === 0) {
-            return false;
-        }
-
-        const index = Math.floor(Math.random() * groupList.length);
-
-        try {
-            // 使用低优先级 IDLE=1 播放动作，这样不会覆盖对话等高优先级动作
-            // pixi-live2d-display 的 motion(group, index, priority) 支持优先级参数
-            const motion = await this.currentModel.motion(group, index, CLICK_MOTION_PRIORITY);
-            if (motion) {
-                console.log(`[Interaction] 教程模式 - 播放动作: ${group}[${index}]（优先级: ${CLICK_MOTION_PRIORITY}）`);
-                return true;
-            }
-        } catch (error) {
-            console.warn('[Interaction] 教程模式 - 动作播放失败:', error);
-        }
-
-        return false;
-    };
 
     // 点击触发随机表情和动作（低优先级，会自动恢复）
     // 使用最低优先级 IDLE=1，确保不会覆盖对话等高优先级动作
-    const CLICK_MOTION_PRIORITY = 1; // IDLE priority
-    const CLICK_EFFECT_DURATION = 3000; // 点击效果持续时间（毫秒）
+    window.live2dManager.CLICK_MOTION_PRIORITY = 2; // IDLE priority
+    window.live2dManager.CLICK_EFFECT_DURATION = 5000; // 点击效果持续时间（毫秒）
 
-    const triggerRandomEmotion = async () => {
-        // 清除之前的点击效果恢复定时器
-        if (this._clickEffectRestoreTimer) {
-            clearTimeout(this._clickEffectRestoreTimer);
-            this._clickEffectRestoreTimer = null;
-        }
-
-        // 教程模式：直接随机播放表情
-        if (window.isInTutorial) {
-            console.log('[Interaction] 教程模式 - 随机播放表情（低优先级，将自动恢复）');
-            try {
-                // 获取表情列表
-                let expressionNames = [];
-                if (this.fileReferences && Array.isArray(this.fileReferences.Expressions)) {
-                    expressionNames = this.fileReferences.Expressions.map(e => e.Name).filter(Boolean);
-                }
-
-                // 随机播放表情
-                if (expressionNames.length > 0) {
-                    const randomExpression = expressionNames[Math.floor(Math.random() * expressionNames.length)];
-                    console.log(`[Interaction] 教程模式 - 播放表情: ${randomExpression}（将在 ${CLICK_EFFECT_DURATION}ms 后恢复）`);
-                    await this.currentModel.expression(randomExpression);
-
-                    const playedMotion = await playTutorialMotion();
-
-                    if (!playedMotion) {
-                        // 动作不可用时，回退到参数动画模拟效果
-                        const model = this.currentModel.internalModel;
-                        if (model && model.coreModel) {
-                            // 随机晃动头部
-                            const angleXIndex = model.coreModel.getParameterIndex('ParamAngleX');
-                            const angleYIndex = model.coreModel.getParameterIndex('ParamAngleY');
-                            const bodyAngleXIndex = model.coreModel.getParameterIndex('ParamBodyAngleX');
-
-                            const duration = 1000 + Math.random() * 1000; // 1-2秒
-                            const startTime = Date.now();
-
-                            const setParamByIndex = (index, value) => {
-                                if (index < 0) return;
-                                if (typeof model.coreModel.setParameterValueByIndex === 'function') {
-                                    model.coreModel.setParameterValueByIndex(index, value);
-                                } else {
-                                    model.coreModel.setParameterValueById(index, value);
-                                }
-                            };
-
-                            const animate = () => {
-                                const elapsed = Date.now() - startTime;
-                                const progress = Math.min(elapsed / duration, 1);
-                                const t = progress * Math.PI * 2; // 一个完整周期
-
-                                setParamByIndex(angleXIndex, Math.sin(t) * 15); // -15 到 15 度
-                                setParamByIndex(angleYIndex, Math.cos(t) * 10); // -10 到 10 度
-                                setParamByIndex(bodyAngleXIndex, Math.sin(t * 0.5) * 5); // 更慢的身体晃动
-
-                                if (progress < 1) {
-                                    requestAnimationFrame(animate);
-                                } else {
-                                    // 动画结束，恢复默认值
-                                    setParamByIndex(angleXIndex, 0);
-                                    setParamByIndex(angleYIndex, 0);
-                                    setParamByIndex(bodyAngleXIndex, 0);
-                                }
-                            };
-
-                            animate();
-                            console.log('[Interaction] 教程模式 - 播放参数动画');
-                        }
-                    }
-
-                    // 设置恢复定时器：在效果持续时间后清除表情，恢复到常驻/默认状态
-                    // 使用唯一 ID 标记此次点击效果，用于判断是否应该恢复
-                    const clickEffectId = Date.now();
-                    this._currentClickEffectId = clickEffectId;
-                    
-                    this._clickEffectRestoreTimer = setTimeout(() => {
-                        this._clickEffectRestoreTimer = null;
-                        
-                        // 检查是否仍然是此次点击效果（没有被新的情感/点击覆盖）
-                        if (this._currentClickEffectId !== clickEffectId) {
-                            console.log('[Interaction] 点击效果已被新的情感覆盖，跳过恢复');
-                            return;
-                        }
-                        
-                        console.log('[Interaction] 点击效果持续时间结束，恢复到默认状态');
-                        this._currentClickEffectId = null;
-                        // 清除表情，恢复到常驻表情或默认状态
-                        if (this.clearExpression) {
-                            this.clearExpression();
-                        }
-                    }, CLICK_EFFECT_DURATION);
-                }
-            } catch (error) {
-                console.warn('[Interaction] 教程模式播放表情失败:', error);
-            }
-            return;
-        }
-
-        // 正常模式：使用情感系统（但使用临时触发，会自动恢复）
-        if (!this.emotionMapping) {
-            console.log('[Interaction] 没有情感映射配置，跳过点击触发');
-            return;
-        }
-
-        // 获取可用的情感列表
-        let availableEmotions = [];
-
-        // 从 emotionMapping 中获取可用情感
-        if (this.emotionMapping.expressions) {
-            availableEmotions = Object.keys(this.emotionMapping.expressions).filter(e => e !== '常驻');
-        }
-
-        // 如果没有配置情感，使用默认列表
-        if (availableEmotions.length === 0) {
-            availableEmotions = ['happy', 'sad', 'angry', 'neutral'];
-        }
-
-        // 随机选择一个情感
-        const randomEmotion = availableEmotions[Math.floor(Math.random() * availableEmotions.length)];
-        console.log(`[Interaction] 点击触发随机情感: ${randomEmotion}（低优先级，将自动恢复）`);
-
-        // 触发临时情感效果
-        try {
-            // 播放低优先级的表情和动作
-            await this._playTemporaryClickEffect(randomEmotion, CLICK_MOTION_PRIORITY, CLICK_EFFECT_DURATION);
-        } catch (error) {
-            console.warn('[Interaction] 触发情感失败:', error);
-        }
-    };
+   
 
     model.on('pointerdown', (event) => {
+        if (!this._isModelReadyForInteraction) return;
         if (this.isLocked) return;
 
         // 检测是否为触摸事件，且是多点触摸（双指缩放）
@@ -508,7 +334,7 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
             return;
         }
 
-        isDragging = true;
+        this._isDraggingModel = true;
         this.isFocusing = false; // 拖拽时禁用聚焦
         const globalPos = event.data.global;
         dragStartPos.x = globalPos.x - model.x;
@@ -527,19 +353,58 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
     });
 
     const onDragEnd = async () => {
-        if (isDragging) {
-            isDragging = false;
+        if (this._isDraggingModel) {
+            this._isDraggingModel = false;
             document.getElementById('live2d-canvas').style.cursor = '';
-
-            // 拖拽结束后恢复按钮的 pointer-events
             restoreButtonPointerEvents();
+
+            if (!this._isModelReadyForInteraction) return;
 
             // 检测是否为点击（非拖拽）
             const clickDuration = Date.now() - clickStartTime;
             if (!hasMoved && clickDuration < CLICK_THRESHOLD_TIME) {
-                // 这是一个点击，触发随机表情和动作
+                // 这是一个点击
                 console.log(`[Interaction] 检测到点击（时长: ${clickDuration}ms）`);
-                await triggerRandomEmotion();
+                
+                // 只在教程模式下，通过点击检测触发随机动画
+                // 非教程模式下，通过 hit 事件处理
+                await new Promise(resolve => setTimeout(resolve, 300));
+
+                if(window.live2dManager.touchSetHitEventLock){
+                    window.live2dManager.touchSetHitEventLock = false;
+                    return;
+                }
+                const UseBlock = "default";
+                
+                // 滤波 毫秒
+                if(!window.live2dManager.touchSetFilter[UseBlock]){
+                    window.live2dManager.touchSetFilter[UseBlock]= Date.now();
+                }else{
+                    let timenow = Date.now();
+                    if(timenow - window.live2dManager.touchSetFilter[UseBlock] > 500){
+                        window.live2dManager.touchSetFilter[UseBlock]= timenow;
+                    }else{
+                        // 似乎按下和松开都算一次触发?
+                        // console.error(timenow - window.live2dManager.touchSetFilter[UseBlock])
+                        return;
+                    }
+                }
+
+
+
+
+                const modelName = window.live2dManager.modelName;
+                const touchSet = window.live2dManager.touchSet && window.live2dManager.touchSet[modelName];
+
+                const d = touchSet && touchSet[UseBlock];
+
+                if (!d || (d.expressions.length == 0 && d.motions.length == 0)) {
+                    // 无配置或配置为空 → 随机播放表情+动作
+                    await window.live2dManager.triggerRandomEmotion();
+                } else {
+                    await window.live2dManager._playTouchSetAnimation(UseBlock);
+                }
+                
                 return; // 点击不需要保存位置
             }
 
@@ -562,11 +427,12 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
     };
 
     const onDragMove = (event) => {
-        if (isDragging) {
+        if (!this._isModelReadyForInteraction) return;
+        if (this._isDraggingModel) {
             // 再次检查是否变成多点触摸
             if (event.touches && event.touches.length > 1) {
                 // 如果变成多点触摸，停止拖拽
-                isDragging = false;
+                this._isDraggingModel = false;
                 document.getElementById('live2d-canvas').style.cursor = '';
                 return;
             }
@@ -623,10 +489,14 @@ Live2DManager.prototype.setupWheelZoom = function (model) {
 
         const oldScale = this.currentModel.scale.x;
         let newScale = event.deltaY < 0 ? oldScale * scaleFactor : oldScale / scaleFactor;
+
+        // 钳制缩放下限（MAX 暂不实施）
+        newScale = Math.max(SCALE_LIMITS.MIN, newScale);
+
         this.currentModel.scale.set(newScale);
 
-        // 使用防抖动保存缩放，避免滚轮过程中频繁保存
-        this._debouncedSavePosition();
+        // 缩放后触发分级恢复检测（含保存），替代原 _debouncedSavePosition
+        this._debouncedSnapCheck();
     };
 
     const view = this.pixi_app.view;
@@ -672,8 +542,8 @@ Live2DManager.prototype.setupTouchZoom = function (model) {
             const scaleChange = currentDistance / initialDistance;
             let newScale = initialScale * scaleChange;
 
-            // 限制缩放范围，避免过大或过小
-            newScale = Math.max(0.1, Math.min(2.0, newScale));
+            // 限制缩放范围，与滚轮缩放保持一致
+            newScale = Math.max(SCALE_LIMITS.MIN, Math.min(SCALE_LIMITS.MAX, newScale));
 
             this.currentModel.scale.set(newScale);
         }
@@ -735,6 +605,7 @@ Live2DManager.prototype.enableMouseTracking = function (model, options = {}) {
             return;
         }
 
+        // isFocusing 用于控制眼睛跟踪，悬浮菜单显示不受影响
         this.isFocusing = true;
         if (lockIcon) lockIcon.style.display = 'block';
         // 锁定状态下不显示浮动菜单
@@ -795,16 +666,29 @@ Live2DManager.prototype.enableMouseTracking = function (model, options = {}) {
     };
 
     const live2dContainer = document.getElementById('live2d-container');
-    let lockedHoverFadeActive = false;
-    const setLockedHoverFade = (shouldFade) => {
+    let ctrlFadeActive = false;      // Ctrl 按住淡化
+    let stationaryFadeActive = false; // 静止1秒淡化
+    const applyFade = () => {
         if (!live2dContainer) return;
-        if (lockedHoverFadeActive === shouldFade) return;
-        lockedHoverFadeActive = shouldFade;
+        const shouldFade = ctrlFadeActive || stationaryFadeActive;
         live2dContainer.classList.toggle('locked-hover-fade', shouldFade);
     };
 
     // 跟踪 Ctrl 键状态（作为备用，主要从事件中直接读取）
     let isCtrlPressed = false;
+
+    // 静止自动淡化：鼠标在模型范围内静止1秒后自动淡化
+    this._stationaryFadeTimer = null;
+    this._hasEnteredHoverRange = false; // 是否已进入过模型范围
+    const STATIONARY_FADE_DELAY = 1000;
+
+    const clearStationaryFadeTimer = () => {
+        if (this._stationaryFadeTimer !== null) {
+            clearTimeout(this._stationaryFadeTimer);
+            this._stationaryFadeTimer = null;
+        }
+    };
+    this._clearStationaryFadeTimer = clearStationaryFadeTimer;
 
     // 清理旧的键盘监听器（在添加新监听器之前）
     if (this._ctrlKeyDownListener) {
@@ -826,10 +710,9 @@ Live2DManager.prototype.enableMouseTracking = function (model, options = {}) {
         // 检查 Ctrl 或 Cmd 键是否释放
         if (!event.ctrlKey && !event.metaKey) {
             isCtrlPressed = false;
-            // Ctrl/Cmd 键释放时，如果正在变淡，立即取消变淡效果
-            if (lockedHoverFadeActive) {
-                setLockedHoverFade(false);
-            }
+            // Ctrl 释放时重新计算淡化状态，让 stationaryFadeActive 有机会生效
+            ctrlFadeActive = false;
+            applyFade();
         }
     };
 
@@ -853,6 +736,7 @@ Live2DManager.prototype.enableMouseTracking = function (model, options = {}) {
 
     // 方法2：同时保留 window 的 pointermove 监听（适用于普通浏览器）
     const onPointerMove = (event) => {
+        if (!this._isModelReadyForInteraction) return;
         // 更新 Ctrl 键状态：综合事件中的状态和本地状态
         // 如果是真实事件，更新本地状态；如果是模拟事件，本地状态保持不变（除非事件里带了 Ctrl）
         if (event.isTrusted) {
@@ -867,13 +751,17 @@ Live2DManager.prototype.enableMouseTracking = function (model, options = {}) {
 
         // 检查模型是否存在，防止切换模型时出现错误
         if (!model) {
-            setLockedHoverFade(false);
+            ctrlFadeActive = false;
+            stationaryFadeActive = false;
+            applyFade();
             return;
         }
 
         // 检查模型是否已被销毁或不在舞台上
         if (model.destroyed || !model.parent || !this.pixi_app || !this.pixi_app.stage) {
-            setLockedHoverFade(false);
+            ctrlFadeActive = false;
+            stationaryFadeActive = false;
+            applyFade();
             return;
         }
         
@@ -909,10 +797,9 @@ Live2DManager.prototype.enableMouseTracking = function (model, options = {}) {
         this._lastMouseY = pointer.y;
 
         // 在拖拽期间不执行任何操作
-        if (model.interactive && model.dragging) {
+        if ((model.interactive && model.dragging) || this._isDraggingModel) {
             return;
         }
-
         // 如果已经点击了"请她离开"，特殊处理
         if (this._goodbyeClicked) {
             const lockIcon = document.getElementById('live2d-lock-icon');
@@ -929,7 +816,9 @@ Live2DManager.prototype.enableMouseTracking = function (model, options = {}) {
             if (returnButtonContainer) {
                 returnButtonContainer.style.display = 'block';
             }
-            setLockedHoverFade(false);
+            ctrlFadeActive = false;
+            stationaryFadeActive = false;
+            applyFade();
             return;
         }
 
@@ -968,33 +857,87 @@ Live2DManager.prototype.enableMouseTracking = function (model, options = {}) {
                 distance = ellipseDistance <= 1 ? 0 : (ellipseDistance - 1) * Math.min(ellipseRadiusX, ellipseRadiusY);
             }
 
-            // 额外检查：鼠标必须在模型可见区域附近
+            // 检查是否启用了全屏跟踪
+            const isFullscreenTracking = this.isFullscreenTrackingEnabled ? this.isFullscreenTrackingEnabled() : false;
+
+            // 额外检查：鼠标必须在模型可见区域附近（除非启用全屏跟踪）
             const isPointerNearVisibleModel = pointer.x >= bounds.left - threshold && pointer.x <= bounds.right + threshold &&
                                               pointer.y >= Math.max(bounds.top, 0) - threshold && pointer.y <= Math.min(bounds.bottom, window.innerHeight) + threshold;
-            
-            // 如果鼠标不在屏幕内或不在模型可见区域附近，视为远离模型
-            if (!isPointerNearVisibleModel) {
+
+            // 如果鼠标不在屏幕内或不在模型可见区域附近，且未启用全屏跟踪，则视为远离模型
+            if (!isPointerNearVisibleModel && !isFullscreenTracking) {
                 this.isFocusing = false;
                 startHideTimer();
-                setLockedHoverFade(false);
+                clearStationaryFadeTimer();
+                ctrlFadeActive = false;
+                stationaryFadeActive = false;
+                applyFade();
                 return;
             }
-            // 只有在锁定、按住 Ctrl 键且鼠标在模型附近时才变淡
-            const shouldFade = this.isLocked && ctrlKeyPressed && distance < HoverFadethreshold;
-            setLockedHoverFade(shouldFade);
+
+            const isNearModel = distance < HoverFadethreshold;
+
+            // 静止时启动定时器，移出范围时清除
+            if (this.isLocked && isNearModel) {
+                // 首次进入范围：设置标志并启动定时器
+                if (!this._hasEnteredHoverRange) {
+                    this._hasEnteredHoverRange = true;
+                    if (this._stationaryFadeTimer === null && !stationaryFadeActive) {
+                        this._stationaryFadeTimer = setTimeout(() => {
+                            stationaryFadeActive = true;
+                            applyFade();
+                        }, STATIONARY_FADE_DELAY);
+                    }
+                }
+                // 已在范围内：移动时不重启定时器，只更新位置
+            } else {
+                // 移出范围：清除定时器并重置标志
+                if (this._stationaryFadeTimer !== null || stationaryFadeActive) {
+                    clearStationaryFadeTimer();
+                    stationaryFadeActive = false;
+                    applyFade();
+                }
+                this._hasEnteredHoverRange = false;
+            }
+
+            // Ctrl 淡化：锁定 + Ctrl + 在模型范围内（独立于静止淡化）
+            ctrlFadeActive = this.isLocked && ctrlKeyPressed && isNearModel;
+            applyFade();
 
             const canvasEl = document.getElementById('live2d-canvas');
+
             if (distance < threshold) {
                 showButtons();
                 if (canvasEl && !this.isLocked && !(model.interactive && model.dragging)) {
                     canvasEl.style.cursor = 'grab';
                 }
-                // 只有当鼠标在模型附近时才调用 focus，避免 Electron 透明窗口中的全局跟踪问题
+                const isMouseTrackingEnabled = this.isMouseTrackingEnabled ? this.isMouseTrackingEnabled() : (window.mouseTrackingEnabled !== false);
                 if (this.isFocusing) {
+                    if (isMouseTrackingEnabled) {
+                        model.focus(pointer.x, pointer.y);
+                    } else {
+                        if (model.internalModel && model.internalModel.focusController) {
+                            const fc = model.internalModel.focusController;
+                            fc.targetX = 0;
+                            fc.targetY = 0;
+                        }
+                    }
+                }
+            } else if (isFullscreenTracking) {
+                if (canvasEl && !this.isLocked && !(model.interactive && model.dragging)) {
+                    canvasEl.style.cursor = 'grab';
+                }
+                const isMouseTrackingEnabled = this.isMouseTrackingEnabled ? this.isMouseTrackingEnabled() : (window.mouseTrackingEnabled !== false);
+                if (isMouseTrackingEnabled) {
                     model.focus(pointer.x, pointer.y);
+                } else {
+                    if (model.internalModel && model.internalModel.focusController) {
+                        const fc = model.internalModel.focusController;
+                        fc.targetX = 0;
+                        fc.targetY = 0;
+                    }
                 }
             } else {
-                // 鼠标离开模型区域，启动隐藏定时器
                 this.isFocusing = false;
                 if (canvasEl && !(model.interactive && model.dragging)) {
                     canvasEl.style.cursor = '';
@@ -1010,12 +953,16 @@ Live2DManager.prototype.enableMouseTracking = function (model, options = {}) {
         }
     };
 
-    // 窗口失去焦点时重置 Ctrl 键状态和变淡效果
+    // 窗口失去焦点时，只重置淡化效果，不重置 Ctrl 键状态
+    // 这样窗口重新获得焦点后，如果 Ctrl 仍被按住，淡化功能可以恢复
     const onBlur = () => {
-        isCtrlPressed = false;
-        if (lockedHoverFadeActive) {
-            setLockedHoverFade(false);
+        clearStationaryFadeTimer();
+        // blur 时清除定时器和淡化状态，焦点恢复后需重新触发
+        if (stationaryFadeActive) {
+            stationaryFadeActive = false;
+            applyFade();
         }
+        this._hasEnteredHoverRange = false;
     };
 
     // 清理旧的监听器
@@ -1104,38 +1051,36 @@ Live2DManager.prototype._playTemporaryClickEffect = async function(emotion, prio
             expressionFiles = this.emotionMapping.expressions[emotion];
         }
         
-        // 兼容旧结构
+        // 兼容旧结构：按 emotion 前缀匹配
         if (expressionFiles.length === 0 && this.fileReferences && Array.isArray(this.fileReferences.Expressions)) {
             const candidates = this.fileReferences.Expressions.filter(e => (e.Name || '').startsWith(emotion));
             expressionFiles = candidates.map(e => e.File).filter(Boolean);
         }
 
-        if (expressionFiles.length > 0) {
-            const choiceFile = this.getRandomElement(expressionFiles);
-            if (choiceFile) {
-                // 在 FileReferences 中查找匹配的表情名称
-                let expressionName = null;
-                if (this.fileReferences && this.fileReferences.Expressions) {
-                    for (const expr of this.fileReferences.Expressions) {
-                        if (expr.File === choiceFile) {
-                            expressionName = expr.Name;
-                            break;
-                        }
-                    }
-                }
-                
-                if (!expressionName) {
-                    const base = String(choiceFile).split('/').pop() || '';
-                    expressionName = base.replace('.exp3.json', '');
-                }
+        // 最终兜底：如果仍然没有匹配到，使用全部可用表情随机播放
+        if (expressionFiles.length === 0 && this.fileReferences && Array.isArray(this.fileReferences.Expressions) && this.fileReferences.Expressions.length > 0) {
+            expressionFiles = this.fileReferences.Expressions.map(e => e.File).filter(Boolean);
+        }
 
-                console.log(`[ClickEffect] 播放临时表情: ${expressionName}`);
-                await this.currentModel.expression(expressionName);
+        if (expressionFiles.length > 0) {
+            // 跳过已确认失效的 expression，避免每次点击都重复 404
+
+            if (typeof this.isExpressionFileMissing === 'function') {
+                expressionFiles = expressionFiles.filter(file => !this.isExpressionFileMissing(file));
             }
+
+            const choiceFile = this.getRandomElement(expressionFiles);
+            if (choiceFile && typeof this.playExpression === 'function') {
+                console.log(`[ClickEffect] 播放临时表情: ${choiceFile}`);
+                await this.playExpression(emotion, choiceFile);
+            }
+        } else {
+            console.log("[ClickEffect] 没找到可用表情")
         }
 
         // 2. 播放低优先级动作
         let motions = null;
+        let motionGroup = emotion; // 用于 this.currentModel.motion(group, index, priority)
         if (this.fileReferences && this.fileReferences.Motions && this.fileReferences.Motions[emotion]) {
             motions = this.fileReferences.Motions[emotion];
         } else if (this.emotionMapping && this.emotionMapping.motions && this.emotionMapping.motions[emotion]) {
@@ -1149,13 +1094,24 @@ Live2DManager.prototype._playTemporaryClickEffect = async function(emotion, prio
             }
         }
 
+        // 兜底：emotion 对不上任何 motion group 时，从所有可用 group 随机选一个
+        if ((!motions || motions.length === 0) && this.fileReferences && this.fileReferences.Motions) {
+            const allGroups = Object.keys(this.fileReferences.Motions).filter(
+                g => Array.isArray(this.fileReferences.Motions[g]) && this.fileReferences.Motions[g].length > 0
+            );
+            if (allGroups.length > 0) {
+                motionGroup = allGroups[Math.floor(Math.random() * allGroups.length)];
+                motions = this.fileReferences.Motions[motionGroup];
+            }
+        }
+
         if (motions && motions.length > 0) {
             // 使用低优先级播放动作
             // pixi-live2d-display 的 motion(group, index, priority) 支持优先级参数
             try {
-                const motion = await this.currentModel.motion(emotion, undefined, priority);
+                const motion = await this.currentModel.motion(motionGroup, undefined, priority);
                 if (motion) {
-                    console.log(`[ClickEffect] 播放临时动作: ${emotion}（优先级: ${priority}）`);
+                    console.log(`[ClickEffect] 播放临时动作: ${motionGroup}（优先级: ${priority}）`);
                     this._clickEffectMotion = motion;
                 }
             } catch (motionError) {
@@ -1177,29 +1133,22 @@ Live2DManager.prototype._playTemporaryClickEffect = async function(emotion, prio
                 return;
             }
             
-            console.log('[ClickEffect] 临时效果结束，恢复到默认状态');
+            console.log('[ClickEffect] 临时效果结束，平滑恢复到默认状态');
             this._currentClickEffectId = null;
-            
-            const motionToStop = this._clickEffectMotion;
             this._clickEffectMotion = null;
-            if (motionToStop && typeof motionToStop.stop === 'function') {
-                try { motionToStop.stop(); } catch (e) {}
-            }
-            
-            try {
-                const expressionManager = this.currentModel &&
-                    this.currentModel.internalModel &&
-                    this.currentModel.internalModel.motionManager &&
-                    this.currentModel.internalModel.motionManager.expressionManager;
-                if (expressionManager && typeof expressionManager.stopAllExpressions === 'function') {
-                    expressionManager.stopAllExpressions();
-                }
-            } catch (e) {
-                console.warn('[ClickEffect] Failed to stop expressions on currentModel:', e);
-            }
 
-            if (typeof this.applyPersistentExpressionsNative === 'function') {
-                try { this.applyPersistentExpressionsNative(true); } catch (e) {}
+            // 使用平滑过渡恢复到初始状态
+            // smoothResetToInitialState 会在第一帧 beforeModelUpdate 中捕获快照后，
+            // 再停止 motion/expression，确保过渡起点与屏幕一致，无视觉跳变。
+            if (typeof this.smoothResetToInitialState === 'function') {
+                this.smoothResetToInitialState().catch(e => {
+                    console.warn('[ClickEffect] 平滑恢复失败，回退到即时恢复:', e);
+                    if (typeof this.clearExpression === 'function') {
+                        this.clearExpression();
+                    }
+                });
+            } else if (typeof this.clearExpression === 'function') {
+                this.clearExpression();
             }
         }, duration);
 
@@ -1262,13 +1211,14 @@ Live2DManager.prototype._savePositionAfterInteraction = async function () {
         }
     }
 
-    // 获取当前屏幕尺寸（用于跨分辨率位置和缩放归一化）
-    // 使用 screen.width/height 而非 renderer 尺寸，避免临时视口变化（F12、输入法等）污染保存数据
+    // 使用渲染器逻辑尺寸作为归一化基准（renderer 不再自动 resize，尺寸与稳定屏幕分辨率等价）
     let viewportInfo = null;
-    const screenW = window.screen.width;
-    const screenH = window.screen.height;
-    if (Number.isFinite(screenW) && Number.isFinite(screenH) && screenW > 0 && screenH > 0) {
-        viewportInfo = { width: screenW, height: screenH };
+    if (this.pixi_app && this.pixi_app.renderer) {
+        const rw = this.pixi_app.renderer.screen.width;
+        const rh = this.pixi_app.renderer.screen.height;
+        if (Number.isFinite(rw) && Number.isFinite(rh) && rw > 0 && rh > 0) {
+            viewportInfo = { width: rw, height: rh };
+        }
     }
 
     // 异步保存，不阻塞交互
@@ -1299,6 +1249,27 @@ Live2DManager.prototype._debouncedSavePosition = function () {
             console.error('防抖动保存位置时出错:', error);
         });
     }, 500);
+};
+
+// 防抖分级恢复检测（用于滚轮缩放后的边界检查 + 位置保存）
+Live2DManager.prototype._debouncedSnapCheck = function () {
+    if (this._snapCheckTimer) clearTimeout(this._snapCheckTimer);
+    // 同时取消可能残留的保存定时器，避免在吸附动画完成前保存中间状态
+    if (this._savePositionDebounceTimer) {
+        clearTimeout(this._savePositionDebounceTimer);
+    }
+    this._snapCheckTimer = setTimeout(async () => {
+        if (!this.currentModel || this._isSnapping) return;
+
+        // 统一复用现有吸附流程（含守卫、动画、保存）
+        // _checkSnapRequired 会根据 overflow 方向计算最近边缘，
+        // 无论模型是部分出界还是完全消失都能正确处理
+        const snapped = await this._checkAndPerformSnap(this.currentModel);
+        if (!snapped) {
+            // 未触发吸附（模型在合理范围内），仅保存缩放后的位置
+            await this._savePositionAfterInteraction();
+        }
+    }, 300);  // 300ms 防抖，等待连续滚轮操作结束
 };
 
 // 多屏幕支持：检测模型是否移出当前屏幕并切换到新屏幕
@@ -1417,43 +1388,7 @@ Live2DManager.prototype._checkAndSwitchDisplay = async function (model) {
     }
 };
 
-/**
- * 设置窗口大小改变时的自动吸附检测
- * 当窗口/屏幕大小改变时，检测模型是否超出边界并执行吸附
- * 注意：不在 resize 时调整模型 scale/position，避免临时视口变化
- *（F12 DevTools、移动端输入法弹出等）导致模型不可逆地缩小
- */
-Live2DManager.prototype.setupResizeSnapDetection = function () {
-    // 防止重复绑定
-    if (this._resizeSnapHandler) {
-        window.removeEventListener('resize', this._resizeSnapHandler);
-    }
-
-    // 防抖动的 resize 处理函数
-    let resizeTimeout = null;
-
-    this._resizeSnapHandler = () => {
-        // 如果正在拖拽或吸附，跳过
-        if (this._isSnapping) return;
-
-        // 清除之前的定时器
-        if (resizeTimeout) {
-            clearTimeout(resizeTimeout);
-        }
-
-        // 延迟执行，避免频繁触发
-        resizeTimeout = setTimeout(async () => {
-            if (!this.currentModel || !this.pixi_app) return;
-
-            // 仅执行吸附检测（防止模型超出屏幕边界）
-            await this._checkAndPerformSnap(this.currentModel);
-        }, 300);
-    };
-
-    window.addEventListener('resize', this._resizeSnapHandler);
-
-    console.debug('[Live2D] 已启用窗口大小改变时的自动吸附检测');
-};
+// setupResizeSnapDetection 已移除：渲染器仅在真实屏幕分辨率变化时 resize，不再需要吸附检测
 
 /**
  * 手动触发吸附检测（供外部调用）
@@ -1543,11 +1478,13 @@ Live2DManager.prototype.cleanupEventListeners = function () {
         this._windowBlurListener = null;
     }
 
-    // 清理 resize 监听器
-    if (this._resizeSnapHandler) {
-        window.removeEventListener('resize', this._resizeSnapHandler);
-        this._resizeSnapHandler = null;
+    // 清理静止淡化定时器
+    if (this._clearStationaryFadeTimer) {
+        this._clearStationaryFadeTimer();
+        this._clearStationaryFadeTimer = null;
     }
+
+    // resize 吸附监听器已移除（setupResizeSnapDetection 不再存在）
 
     // 清理 canvas 上的滚轮和触摸监听器
     if (this.pixi_app && this.pixi_app.view) {
@@ -1580,6 +1517,12 @@ Live2DManager.prototype.cleanupEventListeners = function () {
     if (this._savePositionDebounceTimer) {
         clearTimeout(this._savePositionDebounceTimer);
         this._savePositionDebounceTimer = null;
+    }
+
+    // 清理缩放后吸附检测定时器
+    if (this._snapCheckTimer) {
+        clearTimeout(this._snapCheckTimer);
+        this._snapCheckTimer = null;
     }
 
     // 清理点击效果恢复定时器和 ID
@@ -1642,4 +1585,408 @@ Live2DManager.prototype.destroy = function () {
     }
 
     console.log('[Live2D] Live2DManager 实例已销毁');
+};
+
+
+
+/**
+ * 播放教程模式的随机动作
+ * @returns {Promise<boolean>} 是否成功播放动作
+ */
+Live2DManager.prototype.playTutorialMotion = async function() {
+    if (!this.currentModel || !this.currentModel.motion) {
+        return false;
+    }
+
+    const fileRefMotions = this.fileReferences && this.fileReferences.Motions;
+    let motionGroups = [];
+
+    if (fileRefMotions && typeof fileRefMotions === 'object') {
+        motionGroups = Object.keys(fileRefMotions)
+            .filter(group => group !== 'PreviewAll' && Array.isArray(fileRefMotions[group]) && fileRefMotions[group].length > 0);
+    }
+
+    if (motionGroups.length === 0 &&
+        this.currentModel.internalModel &&
+        this.currentModel.internalModel.motionManager &&
+        this.currentModel.internalModel.motionManager.definitions) {
+        const defs = this.currentModel.internalModel.motionManager.definitions;
+        motionGroups = Object.keys(defs)
+            .filter(group => group !== 'PreviewAll' && Array.isArray(defs[group]) && defs[group].length > 0);
+    }
+
+    if (motionGroups.length === 0) {
+        return false;
+    }
+
+    const group = this.getRandomElement(motionGroups);
+    if (!group) return false;
+
+    const groupList =
+        (fileRefMotions && fileRefMotions[group]) ||
+        (this.currentModel.internalModel &&
+            this.currentModel.internalModel.motionManager &&
+            this.currentModel.internalModel.motionManager.definitions &&
+            this.currentModel.internalModel.motionManager.definitions[group]) ||
+        [];
+
+    if (!Array.isArray(groupList) || groupList.length === 0) {
+        return false;
+    }
+
+    const index = Math.floor(Math.random() * groupList.length);
+
+    try {
+        const motion = await this.currentModel.motion(group, index, window.live2dManager.CLICK_MOTION_PRIORITY);
+        // const motion = await this.currentModel.motion(group, index, 2);
+        if (motion) {
+            console.log(`[Interaction] 教程模式 - 播放动作: ${group}[${index}]（优先级: ${window.live2dManager.CLICK_MOTION_PRIORITY}）`);
+            // console.log(`[Interaction] 教程模式 - 播放动作: ${group}[${index}]（优先级: ${2}）`);
+            return true;
+        }
+    } catch (error) {
+        console.warn('[Interaction] 教程模式 - 动作播放失败:', error);
+    }
+
+    return false;
+};
+
+/**
+ * 触发随机表情和动作（用于教程模式和点击空白区域）
+ */
+Live2DManager.prototype.triggerRandomEmotion = async function() {
+    // 清除之前的点击效果恢复定时器
+    if (this._clickEffectRestoreTimer) {
+        clearTimeout(this._clickEffectRestoreTimer);
+        this._clickEffectRestoreTimer = null;
+    }
+
+    // 教程模式：直接随机播放表情
+    if (window.isInTutorial) {
+        console.log('[Interaction] 教程模式 - 随机播放表情（低优先级，将自动恢复）');
+        try {
+            // 获取表情列表
+            let expressionNames = [];
+            if (this.fileReferences && Array.isArray(this.fileReferences.Expressions)) {
+                expressionNames = this.fileReferences.Expressions.map(e => e.Name).filter(Boolean);
+            }
+
+            // 随机播放表情
+            if (expressionNames.length > 0) {
+                const randomExpression = expressionNames[Math.floor(Math.random() * expressionNames.length)];
+                console.log(`[Interaction] 教程模式 - 播放表情: ${randomExpression}（将在 ${window.live2dManager.CLICK_EFFECT_DURATION}ms 后恢复）`);
+                await this.currentModel.expression(randomExpression);
+
+                const playedMotion = await this.playTutorialMotion();
+
+                if (!playedMotion) {
+                    // 动作不可用时，回退到参数动画模拟效果
+                    const model = this.currentModel.internalModel;
+                    if (model && model.coreModel) {
+                        // 随机晃动头部
+                        const angleXIndex = model.coreModel.getParameterIndex('ParamAngleX');
+                        const angleYIndex = model.coreModel.getParameterIndex('ParamAngleY');
+                        const bodyAngleXIndex = model.coreModel.getParameterIndex('ParamBodyAngleX');
+
+                        const duration = 1000 + Math.random() * 1000; // 1-2秒
+                        const startTime = Date.now();
+
+                        const setParamByIndex = (index, value) => {
+                            if (index < 0) return;
+                            if (typeof model.coreModel.setParameterValueByIndex === 'function') {
+                                model.coreModel.setParameterValueByIndex(index, value);
+                            } else {
+                                model.coreModel.setParameterValueById(index, value);
+                            }
+                        };
+
+                        const animate = () => {
+                            const elapsed = Date.now() - startTime;
+                            const progress = Math.min(elapsed / duration, 1);
+                            const t = progress * Math.PI * 2; // 一个完整周期
+
+                            setParamByIndex(angleXIndex, Math.sin(t) * 15); // -15 到 15 度
+                            setParamByIndex(angleYIndex, Math.cos(t) * 10); // -10 到 10 度
+                            setParamByIndex(bodyAngleXIndex, Math.sin(t * 0.5) * 5); // 更慢的身体晃动
+
+                            if (progress < 1) {
+                                requestAnimationFrame(animate);
+                            } else {
+                                // 动画结束，恢复默认值
+                                setParamByIndex(angleXIndex, 0);
+                                setParamByIndex(angleYIndex, 0);
+                                setParamByIndex(bodyAngleXIndex, 0);
+                            }
+                        };
+
+                        animate();
+                        console.log('[Interaction] 教程模式 - 播放参数动画');
+                    }
+                }
+            }
+        } catch (error) {
+            console.warn('[Interaction] 教程模式播放表情失败:', error);
+        }
+    } else {
+        // 正常模式：使用情感系统
+        // 获取可用的情感列表
+        let availableEmotions = [];
+
+        // 从 emotionMapping 中获取可用情感
+        if (this.emotionMapping && this.emotionMapping.expressions) {
+            availableEmotions = Object.keys(this.emotionMapping.expressions).filter(e => e !== '常驻');
+        }
+
+        // 如果没有配置情感，使用 _playTemporaryClickEffect 内部的兜底逻辑
+        // 传一个占位 emotion，兜底会从 fileReferences 中随机选取
+        if (availableEmotions.length === 0) {
+            availableEmotions = ['_random_fallback'];
+        }
+
+        // 随机选择一个情感
+        const randomEmotion = availableEmotions[Math.floor(Math.random() * availableEmotions.length)];
+        console.log(`[Interaction] 点击触发随机情感: ${randomEmotion}（低优先级，将自动恢复）`);
+
+        // 触发临时情感效果
+        try {
+            // 播放低优先级的表情和动作
+            const result = await this._playTemporaryClickEffect(randomEmotion, 2, window.live2dManager.CLICK_EFFECT_DURATION);
+        } catch (error) {
+            console.warn('[Interaction] 触发情感失败:', error);
+        }
+    }
+
+    // 设置恢复定时器：在效果持续时间后清除表情，恢复到常驻/默认状态
+    // 使用唯一 ID 标记此次点击效果，用于判断是否应该恢复
+    const clickEffectId = Date.now();
+    this._currentClickEffectId = clickEffectId;
+    
+    this._clickEffectRestoreTimer = setTimeout(() => {
+        this._clickEffectRestoreTimer = null;
+        
+        // 检查是否仍然是此次点击效果（没有被新的情感/点击覆盖）
+        if (this._currentClickEffectId !== clickEffectId) {
+            console.log('[Interaction] 点击效果已被新的情感覆盖，跳过恢复');
+            return;
+        }
+        
+        console.log('[Interaction] 点击效果持续时间结束，平滑恢复到默认状态');
+        this._currentClickEffectId = null;
+        // 使用平滑过渡恢复到常驻表情或默认状态（smoothReset 内部会在快照后停止 motion/expression）
+        if (typeof this.smoothResetToInitialState === 'function') {
+            this.smoothResetToInitialState().catch(e => {
+                console.warn('[Interaction] 平滑恢复失败，回退到即时恢复:', e);
+                if (typeof this.clearExpression === 'function') this.clearExpression();
+            });
+        } else if (typeof this.clearExpression === 'function') {
+            this.clearExpression();
+        }
+    }, window.live2dManager.CLICK_EFFECT_DURATION);
+};
+
+/**
+ * 设置 触摸/点击 交互
+ * 使用 pixi-live2d-display 的 'hit' 事件来检测 HitArea 点击
+ * @param {PIXI.DisplayObject} model - Live2D 模型对象
+ */
+Live2DManager.prototype.setupHitAreaInteraction = function(model) {
+    if (!model) {
+        console.error('[HitArea] 模型不存在，无法设置 HitArea 交互');
+        return;
+    }
+
+    // 监听模型的 hit 事件
+    function dd(hitAreas) {
+        // 只在非教程模式下处理 hit 事件
+        // 教程模式下，通过 setupDragAndDrop 的点击检测处理
+        if (window.isInTutorial) {
+            return;
+        }
+
+        window.live2dManager.touchSetHitEventLock = true
+
+        // 滤波 毫秒
+        if(!window.live2dManager.touchSetFilter[hitAreas]){
+            window.live2dManager.touchSetFilter[hitAreas]= Date.now();
+        }else{
+            let timenow = Date.now();
+            if(timenow - window.live2dManager.touchSetFilter[hitAreas] > 500){
+                window.live2dManager.touchSetFilter[hitAreas]= timenow;
+            }else{
+                // 似乎按下和松开都算一次触发?
+                // console.error(timenow - window.live2dManager.touchSetFilter[hitAreas])
+                return;
+            }
+        }
+        console.log('[HitArea] 命中的区域:', hitAreas);
+        const modelName = window.live2dManager.modelName;
+        const touchSet = window.live2dManager.touchSet && window.live2dManager.touchSet[modelName];
+
+        // touchSet 未设置或当前模型无配置 → 直接随机播放
+        if (!touchSet) {
+            console.log('[HitArea] touchSet 未配置，播放随机动画');
+            window.live2dManager.triggerRandomEmotion();
+            return;
+        }
+
+        const UseBlock = touchSet[hitAreas[0]] ? hitAreas[0] : "default";
+        let d = touchSet[UseBlock];
+
+        if (UseBlock == "default") {
+            // 命中的是 default 区域
+            if (d && (d.motions.length > 0 || d.expressions.length > 0)) {
+                // default 有配置，播放 default 动画
+                console.log('[HitArea] 使用 default 配置');
+                window.live2dManager._playTouchSetAnimation("default");
+            } else {
+                // default 也没有配置，播放随机动画
+                console.log('[HitArea] default 无配置，播放随机动画');
+                window.live2dManager.triggerRandomEmotion();
+            }
+            return;
+
+        } else if (!d || (d.expressions.length == 0 && d.motions.length == 0)) {
+            // HitArea区点击 该区域无配置动画
+            if (touchSet["default"] && (touchSet["default"].motions.length > 0 || touchSet["default"].expressions.length > 0)) {
+                // 使用default配置
+                console.log('[HitArea] 区域未绑定touchSet，使用default配置');
+                window.live2dManager._playTouchSetAnimation("default");
+                return;
+            } else {
+                // default 也没有配置，播放随机动画
+                console.log('[HitArea] 区域未绑定 touchSet，播放随机动画');
+                window.live2dManager.triggerRandomEmotion();
+                return;
+            }
+        }
+
+        // 遍历所有命中的 HitArea，播放对应的动画
+        hitAreas.forEach(hitAreaId => {
+            window.live2dManager._playTouchSetAnimation(hitAreaId);
+        });
+    }
+
+    model.on('hit',(hitAreas)=>{dd(hitAreas)});
+    
+    console.log(`[HitArea] HitArea 交互已设置 : ${window.live2dManager.modelName}`);
+};
+
+/**
+ * 根据 touchSet 配置播放 HitArea 对应的动画
+ * @param {string} hitAreaId - HitArea ID
+ */
+Live2DManager.prototype._playTouchSetAnimation = async function(hitAreaId) {
+
+    // ↓只是debug用
+    // const live2d的touch = window.live2dManager.touchSet
+
+
+    if ( hitAreaId ==null || !this.currentModel) {
+        return;
+    }
+    let faceHoldingTime = window.live2dManager.CLICK_EFFECT_DURATION;
+    let AnimHoldingTime = null;
+    // 获取当前模型的 touchSet 配置
+
+    const modelName = this.modelName;
+    const touchSet = this.touchSet && this.touchSet[modelName];
+    
+    if (!touchSet || !touchSet[hitAreaId]) {
+        console.log(`[TouchSet] 没有找到 ${hitAreaId} 的配置`);
+        return;
+    }
+
+    const config = touchSet[hitAreaId];
+    const { motions = [], expressions = [] } = config;
+
+    console.log(`[TouchSet] 播放 ${hitAreaId} 的动画:`, { motions, expressions });
+
+    try {
+        // 播放动作
+        if (motions.length > 0) {
+            const randomMotion = motions[Math.floor(Math.random() * motions.length)];
+            
+            // 优先使用 motionManager.definitions，回退到 fileReferences.Motions
+            const motionDefs = this.currentModel.internalModel?.motionManager?.definitions;
+            const fileRefs = this.fileReferences?.Motions;
+            
+            const motionSources = [
+                motionDefs,
+                fileRefs
+            ].filter(Boolean);
+            
+            for (const motionSource of motionSources) {
+                for (const [groupName, motionList] of Object.entries(motionSource)) {
+                    if (Array.isArray(motionList)) {
+                        const motion = motionList.find(m => {
+                            if (!m || !m.File) return false;
+                            const fileName = m.File.split("motions/")[1]?.replace(".motion3","").replace(".json","");
+                            return fileName === randomMotion;
+                        });
+                        if (motion) {
+                            const index = motionList.indexOf(motion);
+                            console.log(`[TouchSet] 准备播放动作: ${groupName}[${index}], 文件: ${motion.File}`);
+                            
+                            // 获取motion的实际持续时间
+                            try {
+                                let motionPath = motion.File;
+                                if (!motionPath.startsWith('http') && !motionPath.startsWith('/')) {
+                                    motionPath = `${this.modelRootPath}/${motionPath}`;
+                                }
+                                const response = await fetch(motionPath);
+                                if (response.ok) {
+                                    const motionData = await response.json();
+                                    if (motionData.Meta && motionData.Meta.Duration) {
+                                        AnimHoldingTime = motionData.Meta.Duration * 1000;
+                                        faceHoldingTime = AnimHoldingTime;
+                                        console.log(`[TouchSet] 动作持续时间: ${AnimHoldingTime}ms, 表情持续时间将同步`);
+                                    }
+                                }
+                            } catch (error) {
+                                console.warn(`[TouchSet] 无法获取motion持续时间:`, error);
+                            }
+                            
+                            try {
+                                const result = await this.currentModel.motion(groupName, index, 2);
+                                if (result) {
+                                    console.log(`[TouchSet] 成功播放动作: ${groupName}[${index}]`);
+                                } else {
+                                    console.warn(`[TouchSet] 动作播放返回空值: ${groupName}[${index}]`);
+                                }
+                            } catch (motionError) {
+                                console.warn(`[TouchSet] 动作播放异常: ${groupName}[${index}]`, motionError);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 播放表情
+        if (expressions.length > 0) {
+            const randomExpressionName = expressions[Math.floor(Math.random() * expressions.length)];
+            const faceInfo = this.fileReferences?.Expressions?.find(e => e.Name === randomExpressionName);
+            if (!faceInfo || !faceInfo.File) {
+                console.warn(`[TouchSet] 表情文件不存在: ${randomExpressionName}`);
+                
+            }else {
+                console.log(`[TouchSet] 尝试播放表情: ${faceInfo.File}`);
+                try {
+                    await this.playExpression(randomExpressionName, faceInfo.File);
+                    console.log(`[TouchSet] 播放表情成功: ${randomExpressionName}, 持续时间: ${faceHoldingTime}ms`);
+                    
+                    clearTimeout(this.expressionTimer);
+                    this.expressionTimer = setTimeout(() => {
+                        this.clearExpression?.();
+                    }, faceHoldingTime);
+                } catch (e) {
+                    console.warn(`[TouchSet] 播放表情失败: ${randomExpressionName}`, e);
+                }
+            }
+
+        }
+    } catch (error) {
+        console.warn(`[TouchSet] 播放动画失败:`, error);
+    }
 };

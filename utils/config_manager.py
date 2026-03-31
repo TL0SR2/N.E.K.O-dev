@@ -7,8 +7,8 @@ import sys
 import os
 import json
 import shutil
-import logging
 import threading
+import math
 from datetime import date
 from copy import deepcopy
 from pathlib import Path
@@ -17,18 +17,365 @@ from config import (
     APP_NAME,
     CONFIG_FILES,
     DEFAULT_CONFIG_DATA,
+    RESERVED_FIELD_SCHEMA,
 )
-from config.prompts_chara import lanlan_prompt
+from config.prompts_chara import get_lanlan_prompt, is_default_prompt
 from utils.api_config_loader import (
     get_core_api_profiles,
     get_assist_api_profiles,
     get_assist_api_key_fields,
 )
+from utils.custom_tts_adapter import check_custom_tts_voice_allowed
+from utils.file_utils import atomic_write_json
+from utils.logger_config import get_module_logger
 
 # Workshop配置相关常量 - 将在ConfigManager实例化时使用self.workshop_dir
 
 
-logger = logging.getLogger(__name__)
+logger = get_module_logger(__name__)
+
+
+def get_reserved(data: dict, *path, default=None, legacy_keys: tuple[str, ...] | None = None):
+    """统一读取 `_reserved` 下的嵌套字段，支持旧平铺字段回退。
+
+    如果 _reserved 中的嵌套路径存在（即使值为 None），直接返回该值；
+    仅当路径不存在或 _reserved 本身缺失时，才回退到旧平铺字段。
+    """
+    if not isinstance(data, dict):
+        return default
+
+    reserved = data.get("_reserved")
+    if isinstance(reserved, dict):
+        current = reserved
+        found = True
+        for key in path:
+            if not isinstance(current, dict) or key not in current:
+                found = False
+                break
+            current = current[key]
+        if found:
+            return current
+
+    # COMPAT(v1->v2): 旧平铺字段回退读取，避免历史配置在迁移前读不到值。
+    if legacy_keys:
+        for legacy_key in legacy_keys:
+            if legacy_key in data and data[legacy_key] is not None:
+                return data[legacy_key]
+    return default
+
+
+def set_reserved(data: dict, *path_and_value) -> bool:
+    """统一写入 `_reserved` 下的嵌套字段，自动创建中间层。
+
+    Returns ``True`` if the stored value was actually changed, ``False``
+    otherwise (including invalid input).
+    """
+    if not isinstance(data, dict) or len(path_and_value) < 2:
+        return False
+    *path, value = path_and_value
+    if not path:
+        return False
+
+    reserved = data.get("_reserved")
+    if not isinstance(reserved, dict):
+        reserved = {}
+        data["_reserved"] = reserved
+
+    current = reserved
+    for key in path[:-1]:
+        next_node = current.get(key)
+        if not isinstance(next_node, dict):
+            next_node = {}
+            current[key] = next_node
+        current = next_node
+
+    last_key = path[-1]
+    if last_key in current and current[last_key] == value:
+        return False
+    current[last_key] = value
+    return True
+
+
+def _legacy_live2d_to_model_path(legacy_live2d: str) -> str:
+    """将旧 live2d 目录名转为 model3 文件路径。"""
+    if not legacy_live2d:
+        return ""
+    raw = str(legacy_live2d).strip().replace("\\", "/")
+    if not raw:
+        return ""
+    if raw.endswith(".model3.json"):
+        return raw
+    # COMPAT(v1->v2): 历史配置只有目录名（如 mao_pro），迁移时自动补全默认 model3 文件名。
+    return f"{raw}/{raw}.model3.json"
+
+
+def _legacy_live2d_name_from_model_path(model_path: str) -> str:
+    """将新 model_path 反向还原为旧 live2d 模型名（兼容旧前端字段）。"""
+    if not model_path:
+        return ""
+    raw = str(model_path).strip().replace("\\", "/")
+    if not raw:
+        return ""
+    if raw.endswith(".model3.json"):
+        parent = raw.rsplit("/", 1)[0] if "/" in raw else ""
+        if parent:
+            return parent.rsplit("/", 1)[-1]
+        filename = raw.rsplit("/", 1)[-1]
+        name = filename[:-len(".model3.json")]
+        return name
+    return raw.rsplit("/", 1)[-1]
+
+
+def validate_reserved_schema(reserved: dict) -> list[str]:
+    """校验 `_reserved` 结构，返回错误列表（空列表表示通过）。"""
+    errors: list[str] = []
+
+    def _walk(value, schema, path: str):
+        if isinstance(schema, dict):
+            if not isinstance(value, dict):
+                errors.append(f"{path} 需要 dict，实际 {type(value).__name__}")
+                return
+            for key, sub_schema in schema.items():
+                if key in value and value[key] is not None:
+                    _walk(value[key], sub_schema, f"{path}.{key}")
+            return
+        if isinstance(schema, tuple):
+            if not isinstance(value, schema):
+                expected = ",".join(t.__name__ for t in schema)
+                errors.append(f"{path} 需要类型({expected})，实际 {type(value).__name__}")
+            return
+        if not isinstance(value, schema):
+            errors.append(f"{path} 需要 {schema.__name__}，实际 {type(value).__name__}")
+
+    if reserved is None:
+        return errors
+    _walk(reserved, RESERVED_FIELD_SCHEMA, "_reserved")
+    return errors
+
+
+def migrate_catgirl_reserved(catgirl_data: dict) -> bool:
+    """迁移单个角色配置到 `_reserved` 结构，返回是否发生变更。"""
+    if not isinstance(catgirl_data, dict):
+        return False
+
+    changed = False
+
+    if not isinstance(catgirl_data.get("_reserved"), dict):
+        catgirl_data["_reserved"] = {}
+        changed = True
+
+    voice_id = get_reserved(catgirl_data, "voice_id", default="", legacy_keys=("voice_id",))
+    if voice_id is not None:
+        changed |= set_reserved(catgirl_data, "voice_id", str(voice_id))
+
+    system_prompt = get_reserved(catgirl_data, "system_prompt", default=None, legacy_keys=("system_prompt",))
+    if system_prompt is not None:
+        changed |= set_reserved(catgirl_data, "system_prompt", str(system_prompt))
+
+    model_type = str(
+        get_reserved(catgirl_data, "avatar", "model_type", default="", legacy_keys=("model_type",))
+    ).strip().lower()
+    if model_type not in {"live2d", "vrm", "live3d"}:
+        has_vrm = catgirl_data.get("vrm") or get_reserved(catgirl_data, "avatar", "vrm", "model_path")
+        has_mmd = catgirl_data.get("mmd") or get_reserved(catgirl_data, "avatar", "mmd", "model_path")
+        model_type = "live3d" if (has_vrm or has_mmd) else "live2d"
+    # 归一化：旧配置中的 'vrm' 统一为 'live3d'
+    if model_type == "vrm":
+        model_type = "live3d"
+    changed |= set_reserved(catgirl_data, "avatar", "model_type", model_type)
+
+    asset_source_id = get_reserved(
+        catgirl_data,
+        "avatar",
+        "asset_source_id",
+        default="",
+        legacy_keys=("live2d_item_id", "item_id"),
+    )
+    asset_source_id = str(asset_source_id).strip() if asset_source_id is not None else ""
+    changed |= set_reserved(catgirl_data, "avatar", "asset_source_id", asset_source_id)
+
+    asset_source = get_reserved(catgirl_data, "avatar", "asset_source", default="")
+    if not asset_source:
+        asset_source = "steam_workshop" if asset_source_id else "local"
+    changed |= set_reserved(catgirl_data, "avatar", "asset_source", str(asset_source))
+
+    live2d_model_path = get_reserved(
+        catgirl_data,
+        "avatar",
+        "live2d",
+        "model_path",
+        default="",
+        legacy_keys=("live2d",),
+    )
+    if live2d_model_path:
+        changed |= set_reserved(
+            catgirl_data,
+            "avatar",
+            "live2d",
+            "model_path",
+            _legacy_live2d_to_model_path(str(live2d_model_path)),
+        )
+
+    vrm_model_path = get_reserved(
+        catgirl_data,
+        "avatar",
+        "vrm",
+        "model_path",
+        default="",
+        legacy_keys=("vrm",),
+    )
+    if vrm_model_path:
+        changed |= set_reserved(catgirl_data, "avatar", "vrm", "model_path", str(vrm_model_path).strip())
+
+    vrm_animation = get_reserved(
+        catgirl_data,
+        "avatar",
+        "vrm",
+        "animation",
+        default=None,
+        legacy_keys=("vrm_animation",),
+    )
+    if vrm_animation is not None:
+        changed |= set_reserved(catgirl_data, "avatar", "vrm", "animation", vrm_animation)
+
+    idle_animation = get_reserved(
+        catgirl_data,
+        "avatar",
+        "vrm",
+        "idle_animation",
+        default="",
+        legacy_keys=("idleAnimation",),
+    )
+    if idle_animation:
+        changed |= set_reserved(catgirl_data, "avatar", "vrm", "idle_animation", str(idle_animation))
+
+    lighting = get_reserved(
+        catgirl_data,
+        "avatar",
+        "vrm",
+        "lighting",
+        default=None,
+        legacy_keys=("lighting",),
+    )
+    if isinstance(lighting, dict):
+        changed |= set_reserved(catgirl_data, "avatar", "vrm", "lighting", lighting)
+
+    # MMD 模型路径迁移
+    mmd_model_path = get_reserved(
+        catgirl_data,
+        "avatar",
+        "mmd",
+        "model_path",
+        default="",
+        legacy_keys=("mmd",),
+    )
+    if mmd_model_path:
+        changed |= set_reserved(catgirl_data, "avatar", "mmd", "model_path", str(mmd_model_path).strip())
+
+    mmd_animation = get_reserved(
+        catgirl_data,
+        "avatar",
+        "mmd",
+        "animation",
+        default=None,
+        legacy_keys=("mmd_animation",),
+    )
+    if mmd_animation is not None:
+        changed |= set_reserved(catgirl_data, "avatar", "mmd", "animation", mmd_animation)
+
+    mmd_idle_animation = get_reserved(
+        catgirl_data,
+        "avatar",
+        "mmd",
+        "idle_animation",
+        default="",
+        legacy_keys=("mmd_idle_animation",),
+    )
+    if mmd_idle_animation:
+        changed |= set_reserved(catgirl_data, "avatar", "mmd", "idle_animation", str(mmd_idle_animation))
+
+    # COMPAT(v1->v2): 保留字段统一迁入 _reserved 后，移除旧平铺字段，避免再次泄露到可编辑字段。
+    for legacy_key in (
+        "voice_id",
+        "system_prompt",
+        "model_type",
+        "live2d_item_id",
+        "item_id",
+        "live2d",
+        "vrm",
+        "vrm_animation",
+        "idleAnimation",
+        "lighting",
+        "vrm_rotation",
+        "mmd",
+        "mmd_animation",
+        "mmd_idle_animation",
+    ):
+        if legacy_key in catgirl_data:
+            catgirl_data.pop(legacy_key, None)
+            changed = True
+
+    return changed
+
+
+def flatten_reserved(catgirl_data: dict) -> dict:
+    """将 `_reserved` 展开成旧平铺字段（仅用于兼容旧调用方/前端）。"""
+    if not isinstance(catgirl_data, dict):
+        return catgirl_data
+    result = dict(catgirl_data)
+
+    voice_id = get_reserved(result, "voice_id", default="")
+    if voice_id:
+        result["voice_id"] = voice_id
+    system_prompt = get_reserved(result, "system_prompt", default=None)
+    if system_prompt is not None:
+        result["system_prompt"] = system_prompt
+
+    model_type = get_reserved(result, "avatar", "model_type", default="live2d")
+    if model_type:
+        result["model_type"] = model_type
+
+    live2d_model_path = get_reserved(result, "avatar", "live2d", "model_path", default="")
+    if live2d_model_path:
+        # COMPAT(v1->v2): 旧前端/接口读取 live2d 模型名，继续按历史语义回放目录名。
+        result["live2d"] = _legacy_live2d_name_from_model_path(str(live2d_model_path))
+
+    vrm_model_path = get_reserved(result, "avatar", "vrm", "model_path", default="")
+    if vrm_model_path:
+        result["vrm"] = vrm_model_path
+
+    asset_source_id = get_reserved(result, "avatar", "asset_source_id", default="")
+    if asset_source_id:
+        result["live2d_item_id"] = asset_source_id
+
+    vrm_animation = get_reserved(result, "avatar", "vrm", "animation", default=None)
+    if vrm_animation is not None:
+        result["vrm_animation"] = vrm_animation
+
+    idle_animation = get_reserved(result, "avatar", "vrm", "idle_animation", default="")
+    if idle_animation:
+        result["idleAnimation"] = idle_animation
+
+    lighting = get_reserved(result, "avatar", "vrm", "lighting", default=None)
+    if isinstance(lighting, dict):
+        result["lighting"] = lighting
+
+    mmd_model_path = get_reserved(result, "avatar", "mmd", "model_path", default="")
+    if mmd_model_path:
+        result["mmd"] = mmd_model_path
+
+    mmd_animation = get_reserved(result, "avatar", "mmd", "animation", default=None)
+    if mmd_animation is not None:
+        result["mmd_animation"] = mmd_animation
+
+    mmd_idle_animation = get_reserved(result, "avatar", "mmd", "idle_animation", default="")
+    if mmd_idle_animation:
+        result["mmd_idle_animation"] = mmd_idle_animation
+
+    touch_set = get_reserved(result, 'touch_set', default=None)
+    if touch_set:
+        result['touch_set'] = touch_set
+    return result
 
 
 class ConfigManager:
@@ -47,15 +394,37 @@ class ConfigManager:
         # 检测是否在子进程中，子进程静默初始化（通过 main_server.py 设置的环境变量）
         self._verbose = '_NEKO_MAIN_SERVER_INITIALIZED' not in os.environ
         self.docs_dir = self._get_documents_directory()
+
+        # CFA (Windows 受控文件夹访问/反勒索防护) 检测：
+        # 如果原始 Documents 路径可读但不可写，记住它以便从中读取用户数据（模型等）
+        first_readable = getattr(self, '_first_readable_candidate', None)
+        if (first_readable is not None
+                and first_readable != self.docs_dir):
+            self._readable_docs_dir = first_readable
+            print("⚠ WARNING [ConfigManager] 文档目录不可写（可能受Windows安全策略/反勒索防护保护）!", file=sys.stderr)
+            print(f"⚠ WARNING [ConfigManager] 原始文档路径(只读): {first_readable}", file=sys.stderr)
+            print(f"⚠ WARNING [ConfigManager] 回退写入路径: {self.docs_dir}", file=sys.stderr)
+            print("⚠ WARNING [ConfigManager] 用户数据将从原始路径读取，写入操作将使用回退路径", file=sys.stderr)
+        else:
+            self._readable_docs_dir = None
+
         self.app_docs_dir = self.docs_dir / self.app_name
         self.config_dir = self.app_docs_dir / "config"
         self.memory_dir = self.app_docs_dir / "memory"
+        self.plugins_dir = self.app_docs_dir / "plugins"
         self.live2d_dir = self.app_docs_dir / "live2d"
         # VRM模型存储在用户文档目录下（与Live2D保持一致）
         self.vrm_dir = self.app_docs_dir / "vrm"
         self.vrm_animation_dir = self.vrm_dir / "animation"  # VRMA动画文件目录
+        # MMD模型存储在用户文档目录下
+        self.mmd_dir = self.app_docs_dir / "mmd"
+        self.mmd_animation_dir = self.mmd_dir / "animation"  # VMD动画文件目录
         self.workshop_dir = self.app_docs_dir / "workshop"
+        self._steam_workshop_path = None
+        self._user_workshop_folder_persisted = False
         self.chara_dir = self.app_docs_dir / "character_cards"
+        self._workshop_config_lock = threading.Lock()
+        self._workshop_config_cleanup_done = False
 
         self.project_config_dir = self._get_project_config_directory()
         self.project_memory_dir = self._get_project_memory_directory()
@@ -134,7 +503,13 @@ class ConfigManager:
             # 添加默认路径候选
             candidates.append(Path.home() / "Documents")
             candidates.append(Path.home() / "文档")
-            
+
+            # AppData/Local 不受 Windows 受控文件夹访问(CFA/反勒索防护)保护，
+            # 作为 Documents 不可写时的优先回退位置
+            localappdata = os.environ.get('LOCALAPPDATA', '')
+            if localappdata:
+                candidates.append(Path(localappdata))
+
             # 如果都不行，使用exe所在目录（打包后）或当前目录（开发时）
             if getattr(sys, 'frozen', False):
                 candidates.append(Path(sys.executable).parent)
@@ -154,8 +529,14 @@ class ConfigManager:
             candidates.append(Path.cwd())
         
         # 遍历候选路径，找到第一个真正可访问且可写的路径
+        # 同时记录第一个可读的路径（即使不可写），用于 CFA 场景下的只读回退
+        first_readable = None
         for docs_dir in candidates:
             try:
+                # 记录第一个存在且可读的路径（CFA 只阻止写入，不阻止读取）
+                if first_readable is None and docs_dir.exists() and os.access(str(docs_dir), os.R_OK):
+                    first_readable = docs_dir
+
                 # 检查路径是否存在且可访问
                 if docs_dir.exists() and os.access(str(docs_dir), os.R_OK | os.W_OK):
                     # 尝试在该目录创建测试文件，确保真的可写
@@ -164,11 +545,12 @@ class ConfigManager:
                         test_path.touch()
                         test_path.unlink()
                         self._log(f"[ConfigManager] ✓ Using documents directory: {docs_dir}")
+                        self._first_readable_candidate = first_readable
                         return docs_dir
                     except Exception as e:
                         self._log(f"[ConfigManager] Path exists but not writable: {docs_dir} - {e}")
                         continue
-                
+
                 # 如果路径不存在，尝试创建（测试是否可写）
                 if not docs_dir.exists():
                     # 分步创建父目录
@@ -179,23 +561,25 @@ class ConfigManager:
                         current = current.parent
                         if current == current.parent:  # 到达根目录
                             break
-                    
+
                     # 从最顶层开始创建
                     for dir_path in reversed(dirs_to_create):
                         if not dir_path.exists():
                             dir_path.mkdir(exist_ok=True)
-                    
+
                     # 测试可写性
                     test_path = docs_dir / ".test_neko_write"
                     test_path.touch()
                     test_path.unlink()
                     self._log(f"[ConfigManager] ✓ Using documents directory (created): {docs_dir}")
+                    self._first_readable_candidate = first_readable
                     return docs_dir
             except Exception as e:
                 self._log(f"[ConfigManager] Failed to use path {docs_dir}: {e}")
                 continue
-        
+
         # 如果所有候选都失败，返回当前目录
+        self._first_readable_candidate = first_readable
         fallback = Path.cwd()
         self._log(f"[ConfigManager] ⚠ All document directories failed, using fallback: {fallback}")
         return fallback
@@ -302,6 +686,18 @@ class ConfigManager:
         except Exception as e:
             print(f"Warning: Failed to create memory directory: {e}", file=sys.stderr)
             return False
+
+    def ensure_plugins_directory(self):
+        """确保我的文档下的plugins目录存在"""
+        try:
+            if not self._ensure_app_docs_directory():
+                return False
+
+            self.plugins_dir.mkdir(exist_ok=True)
+            return True
+        except Exception as e:
+            print(f"Warning: Failed to create plugins directory: {e}", file=sys.stderr)
+            return False
     
     def ensure_live2d_directory(self):
         """确保我的文档下的live2d目录存在"""
@@ -309,13 +705,29 @@ class ConfigManager:
             # 先确保app_docs_dir存在
             if not self._ensure_app_docs_directory():
                 return False
-            
+
             self.live2d_dir.mkdir(exist_ok=True)
             return True
         except Exception as e:
             print(f"Warning: Failed to create live2d directory: {e}", file=sys.stderr)
             return False
-        
+
+    @property
+    def readable_live2d_dir(self):
+        """原始 Documents 下的 live2d 目录（只读，用于 CFA 场景）。
+
+        当 Windows 受控文件夹访问(CFA/反勒索防护) 阻止写入 Documents 时，
+        写入操作回退到 AppData，但用户的模型文件仍在原始 Documents 中。
+        此属性返回原始 Documents 中的 live2d 路径以供读取。
+
+        非 CFA 场景下返回 None（此时 live2d_dir 本身就指向 Documents）。
+        """
+        if self._readable_docs_dir is not None:
+            p = self._readable_docs_dir / self.app_name / "live2d"
+            if p.exists():
+                return p
+        return None
+
     def ensure_vrm_directory(self):
         """确保用户文档目录下的vrm目录和animation子目录存在"""
         try:
@@ -329,6 +741,18 @@ class ConfigManager:
             return True
         except Exception as e:
             print(f"Warning: Failed to create vrm directory: {e}", file=sys.stderr)
+            return False
+    
+    def ensure_mmd_directory(self):
+        """确保用户文档目录下的mmd目录和animation子目录存在"""
+        try:
+            if not self._ensure_app_docs_directory():
+                return False
+            self.mmd_dir.mkdir(parents=True, exist_ok=True)
+            self.mmd_animation_dir.mkdir(parents=True, exist_ok=True)
+            return True
+        except Exception as e:
+            print(f"Warning: Failed to create mmd directory: {e}", file=sys.stderr)
             return False
         
     def ensure_chara_directory(self):
@@ -528,6 +952,28 @@ class ConfigManager:
         except Exception as e:
             logger.error("读取猫娘配置文件出错: %s，使用默认人设。", e)
             character_data = self.get_default_characters()
+
+        migrated = False
+        if not isinstance(character_data, dict):
+            logger.warning("角色配置文件结构异常（非 dict），使用默认配置。")
+            character_data = self.get_default_characters()
+        catgirl_map = character_data.get("猫娘")
+        if isinstance(catgirl_map, dict):
+            for name, catgirl_data in catgirl_map.items():
+                if not isinstance(catgirl_data, dict):
+                    logger.warning("角色 '%s' 配置非 dict，跳过迁移。", name)
+                    continue
+                if migrate_catgirl_reserved(catgirl_data):
+                    migrated = True
+                reserved_errors = validate_reserved_schema(catgirl_data.get("_reserved"))
+                if reserved_errors:
+                    logger.warning("检测到角色 _reserved 字段结构异常: %s", "; ".join(reserved_errors))
+        if migrated:
+            try:
+                self.save_characters(character_data, character_json_path=character_json_path)
+                logger.info("检测到旧版角色保留字段，已自动迁移到 _reserved 结构。")
+            except Exception as migrate_err:
+                logger.warning("自动迁移角色保留字段后写回失败: %s", migrate_err)
         return character_data
 
     def save_characters(self, data, character_json_path=None):
@@ -538,8 +984,7 @@ class ConfigManager:
         # 确保config目录存在
         self.ensure_config_directory()
 
-        with open(character_json_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        atomic_write_json(character_json_path, data, ensure_ascii=False, indent=2)
 
     # --- Voice storage helpers ---
 
@@ -559,19 +1004,134 @@ class ConfigManager:
             logger.error("保存音色配置失败: %s", e)
             raise
 
-    def get_voices_for_current_api(self):
-        """获取当前 AUDIO_API_KEY 对应的所有音色"""
-        core_config = self.get_core_config()
-        audio_api_key = core_config.get('AUDIO_API_KEY', '')
+    @staticmethod
+    def is_legacy_cosyvoice_id(voice_id: str) -> bool:
+        """CosyVoice v2 / v3 的克隆音色 ID 已随 CosyVoice 3.5 升级而失效。"""
+        return bool(voice_id) and (
+            voice_id.startswith("cosyvoice-v2") or voice_id.startswith("cosyvoice-v3-")
+        )
 
-        if not audio_api_key:
-            logger.warning("未配置 AUDIO_API_KEY")
-            return {}
+    def get_tts_api_key(self, provider: str) -> str | None:
+        """根据 provider 统一获取 TTS API Key，返回 None 表示未配置。
 
+        - cosyvoice: tts_custom 配置的 api_key
+        - minimax:   ASSIST_API_KEY_MINIMAX → MINIMAX_API_KEY fallback
+        - minimax_intl: ASSIST_API_KEY_MINIMAX_INTL → MINIMAX_INTL_API_KEY fallback
+        """
+        if provider == 'cosyvoice':
+            tts_config = self.get_model_api_config('tts_custom')
+            key = (tts_config.get('api_key') or '').strip()
+            return key or None
+        if provider in ('minimax', 'minimax_intl'):
+            core_config = self.get_core_config()
+            if provider == 'minimax_intl':
+                key = (core_config.get('ASSIST_API_KEY_MINIMAX_INTL') or '').strip()
+            else:
+                key = (core_config.get('ASSIST_API_KEY_MINIMAX') or '').strip()
+            if not key:
+                try:
+                    import utils.minimax_api_keys as _mm_keys
+                    fallback = getattr(_mm_keys, 'MINIMAX_INTL_API_KEY', None) if provider == 'minimax_intl' else getattr(_mm_keys, 'MINIMAX_API_KEY', None)
+                    key = (fallback or '').strip()
+                except ImportError:
+                    logger.debug("utils.minimax_api_keys not found, no fallback MiniMax keys available")
+            return key or None
+        return None
+
+    def _get_minimax_storage_keys(self) -> list[str]:
+        """返回当前 MiniMax API Key 对应的 voice_storage key 列表。
+
+        通过 get_tts_api_key 获取已解析的 key（含 env fallback），
+        分别为国服和国际服生成 bucket 前缀。
+        """
         voice_storage = self.load_voice_storage()
-        all_voices = voice_storage.get(audio_api_key, {})
-        # 过滤掉以 "cosyvoice-v2" 开头的旧版音色ID
-        return {k: v for k, v in all_voices.items() if not k.startswith("cosyvoice-v2")}
+        result = []
+
+        # 国服 key → __MINIMAX__{suffix}
+        cn_key = self.get_tts_api_key('minimax')
+        if cn_key:
+            suffix = cn_key[-8:] if len(cn_key) >= 8 else cn_key
+            bucket = f'__MINIMAX__{suffix}'
+            if bucket in voice_storage:
+                result.append(bucket)
+
+        # 国际服 key → __MINIMAX_INTL__{suffix}
+        intl_key = self.get_tts_api_key('minimax_intl')
+        if intl_key:
+            suffix = intl_key[-8:] if len(intl_key) >= 8 else intl_key
+            bucket = f'__MINIMAX_INTL__{suffix}'
+            if bucket in voice_storage:
+                result.append(bucket)
+
+        return result
+
+    @staticmethod
+    def _infer_provider_from_storage_key(storage_key: str) -> str:
+        """根据 voice_storage 的分区 key 推断 provider（仅用于兼容旧数据）。"""
+        if storage_key == '__LOCAL_TTS__':
+            return 'local'
+        if storage_key.startswith('__MINIMAX_INTL__'):
+            return 'minimax_intl'
+        if storage_key.startswith('__MINIMAX__'):
+            return 'minimax'
+        return 'cosyvoice'
+
+    def get_voices_for_current_api(self):
+        """获取当前 TTS 配置对应的所有音色
+
+        根据实际使用的 TTS 配置返回音色：
+        1. 本地 TTS（ws/wss 协议）→ 返回 __LOCAL_TTS__ 下的音色
+        2. 阿里云 TTS（通过 ASSIST_API_KEY_QWEN）→ 返回该 API Key 下的音色
+        3. 其他情况 → 返回 AUDIO_API_KEY 下的音色
+        结果中同时合并 MiniMax 音色（__MINIMAX__ 下的音色）。
+
+        返回的每个 voice_data 都保证包含 ``provider`` 字段
+        （``local`` / ``minimax`` / ``minimax_intl`` / ``cosyvoice``）。
+        """
+        voice_storage = self.load_voice_storage()
+
+        tts_config = self.get_model_api_config('tts_custom')
+        base_url = tts_config.get('base_url', '')
+        is_local_tts = tts_config.get('is_custom') and base_url.startswith(('ws://', 'wss://'))
+
+        if is_local_tts:
+            storage_key = '__LOCAL_TTS__'
+            all_voices = voice_storage.get(storage_key, {})
+            result = {k: v for k, v in all_voices.items() if not self.is_legacy_cosyvoice_id(k)}
+        else:
+            tts_api_key = tts_config.get('api_key', '')
+            if tts_api_key:
+                storage_key = tts_api_key
+                all_voices = voice_storage.get(storage_key, {})
+                result = {k: v for k, v in all_voices.items() if not self.is_legacy_cosyvoice_id(k)}
+            else:
+                core_config = self.get_core_config()
+                audio_api_key = core_config.get('AUDIO_API_KEY', '')
+                if not audio_api_key:
+                    storage_key = ''
+                    result = {}
+                else:
+                    storage_key = audio_api_key
+                    all_voices = voice_storage.get(storage_key, {})
+                    result = {k: v for k, v in all_voices.items() if not self.is_legacy_cosyvoice_id(k)}
+
+        # 确保主分区音色有 provider 字段
+        default_provider = self._infer_provider_from_storage_key(storage_key) if storage_key else 'cosyvoice'
+        for vdata in result.values():
+            if isinstance(vdata, dict) and 'provider' not in vdata:
+                vdata['provider'] = default_provider
+
+        # 合并 MiniMax 音色，并确保 provider 字段
+        for mk in self._get_minimax_storage_keys():
+            mm_provider = self._infer_provider_from_storage_key(mk)
+            minimax_voices = voice_storage.get(mk, {})
+            for vid, vdata in minimax_voices.items():
+                if vid not in result:
+                    if isinstance(vdata, dict) and 'provider' not in vdata:
+                        vdata['provider'] = mm_provider
+                    result[vid] = vdata
+
+        return result
 
     def save_voice_for_current_api(self, voice_id, voice_data):
         """为当前 AUDIO_API_KEY 保存音色"""
@@ -588,32 +1148,93 @@ class ConfigManager:
         voice_storage[audio_api_key][voice_id] = voice_data
         self.save_voice_storage(voice_storage)
 
-    def delete_voice_for_current_api(self, voice_id):
-        """删除当前 AUDIO_API_KEY 下的指定音色"""
-        core_config = self.get_core_config()
-        audio_api_key = core_config.get('AUDIO_API_KEY', '')
-
-        if not audio_api_key:
-            raise ValueError("未配置 AUDIO_API_KEY")
+    def save_voice_for_api_key(self, api_key: str, voice_id: str, voice_data: dict):
+        """为指定的 API Key 保存音色（用于复刻时使用实际 API Key 而非 AUDIO_API_KEY）"""
+        if not api_key:
+            raise ValueError("API Key 不能为空")
 
         voice_storage = self.load_voice_storage()
-        if audio_api_key not in voice_storage:
+        if api_key not in voice_storage:
+            voice_storage[api_key] = {}
+
+        voice_storage[api_key][voice_id] = voice_data
+        self.save_voice_storage(voice_storage)
+
+    def find_voice_by_audio_md5(self, api_key: str, audio_md5: str, ref_language: str | None = None):
+        """在指定 API Key 下按参考音频 MD5（及可选 ref_language）查找已有音色。
+
+        返回 (voice_id, voice_data) 或 None。
+        旧条目没有 audio_md5 字段时会被自动跳过（向后兼容）。
+        当 ref_language 不为 None 时，要求 voice_data 中的 ref_language 也匹配
+        （旧条目无 ref_language 字段视为 'ch'）。
+        """
+        if not api_key or not audio_md5:
+            return None
+        voice_storage = self.load_voice_storage()
+        voices = voice_storage.get(api_key, {})
+        for vid, vdata in voices.items():
+            if isinstance(vdata, dict) and vdata.get('audio_md5') == audio_md5:
+                if ref_language is not None and vdata.get('ref_language', 'ch') != ref_language:
+                    continue
+                return (vid, vdata)
+        return None
+
+    def delete_voice_for_current_api(self, voice_id):
+        """删除当前 TTS 配置下的指定音色（含 MiniMax 音色）"""
+        voice_storage = self.load_voice_storage()
+
+        # 先检查 MiniMax 存储（__MINIMAX__ / __MINIMAX_INTL__ 开头的 key）
+        for storage_key in list(voice_storage.keys()):
+            if (storage_key.startswith('__MINIMAX__') or storage_key.startswith('__MINIMAX_INTL__')) and voice_id in voice_storage.get(storage_key, {}):
+                del voice_storage[storage_key][voice_id]
+                self.save_voice_storage(voice_storage)
+                return True
+        
+        tts_config = self.get_model_api_config('tts_custom')
+        base_url = tts_config.get('base_url', '')
+        is_local_tts = tts_config.get('is_custom') and base_url.startswith(('ws://', 'wss://'))
+        
+        if is_local_tts:
+            api_key = '__LOCAL_TTS__'
+        else:
+            api_key = tts_config.get('api_key', '')
+            if not api_key:
+                core_config = self.get_core_config()
+                api_key = core_config.get('AUDIO_API_KEY', '')
+
+        if not api_key:
             return False
 
-        if voice_id in voice_storage[audio_api_key]:
-            del voice_storage[audio_api_key][voice_id]
+        if api_key not in voice_storage:
+            return False
+
+        if voice_id in voice_storage[api_key]:
+            del voice_storage[api_key][voice_id]
             self.save_voice_storage(voice_storage)
             return True
         return False
 
     def validate_voice_id(self, voice_id):
-        """校验 voice_id 是否在当前 AUDIO_API_KEY 下有效"""
+        """校验 voice_id 是否在当前 AUDIO_API_KEY 下有效。
+        
+        校验覆盖四类 voice_id：
+          1. "cosyvoice-v2/v3..." → 旧版格式，始终无效
+          2. "gsv:xxx" → 委托 check_custom_tts_voice_allowed (custom_tts_adapter)
+             判定，由适配器根据 tts_custom 配置决定有效性
+          3. 普通 ID → 在 voice_storage (CosyVoice 云端克隆音色) 中查找
+          4. 免费预设音色 → 这里只做静态白名单放行；运行时由 core.py
+             _should_block_free_preset_voice 根据线路 (lanlan.tech / lanlan.app)
+             动态决定是否实际启用（lanlan.app 海外节点不支持预设音色）
+        """
         if not voice_id:
             return True
 
-        # 自动忽略以 "cosyvoice-v2" 开头的旧版音色ID
-        if voice_id.startswith("cosyvoice-v2"):
+        if self.is_legacy_cosyvoice_id(voice_id):
             return False
+
+        custom_tts_allowed = check_custom_tts_voice_allowed(voice_id, self.get_model_api_config)
+        if custom_tts_allowed is not None:
+            return custom_tts_allowed
 
         voices = self.get_voices_for_current_api()
         if voice_id in voices:
@@ -627,34 +1248,65 @@ class ConfigManager:
 
         return False
 
-    def cleanup_invalid_voice_ids(self):
-        """清理 characters.json 中无效的 voice_id"""
-        character_data = self.load_characters()
-        voices = self.get_voices_for_current_api()
-        
-        # 免费预设音色也是有效的，不应被清理
+    def validate_voice_id_for_api_key(self, api_key: str, voice_id: str) -> bool:
+        """校验 voice_id 是否在指定 API Key 下有效"""
+        if not voice_id:
+            return True
+
+        if self.is_legacy_cosyvoice_id(voice_id):
+            return False
+
+        custom_tts_allowed = check_custom_tts_voice_allowed(voice_id, self.get_model_api_config)
+        if custom_tts_allowed is not None:
+            return custom_tts_allowed
+
+        voice_storage = self.load_voice_storage()
+        voices = voice_storage.get(api_key, {})
+        if voice_id in voices:
+            return True
+
         from utils.api_config_loader import get_free_voices
-        free_voice_ids = set(get_free_voices().values())
+        free_voices = get_free_voices()
+        if voice_id in free_voices.values():
+            return True
+
+        return False
+
+    def cleanup_invalid_voice_ids(self):
+        """清理 characters.json 中无效的 voice_id。
         
+        通过 validate_voice_id 统一判定有效性，不含 provider 专属逻辑。
+        注意：免费预设音色在此处不会被清理（validate_voice_id 白名单放行），
+        实际可用性由 core.py 运行时按 free + lanlan.app/lanlan.tech 线路决定。
+
+        Returns:
+            (cleaned_count, legacy_cosyvoice_names): 清理总数 及 因旧版 CosyVoice 被清理的角色名列表
+        """
+        character_data = self.load_characters()
         cleaned_count = 0
+        legacy_cosyvoice_names: list[str] = []
 
         catgirls = character_data.get('猫娘', {})
         for name, config in catgirls.items():
-            voice_id = config.get('voice_id', '')
-            if voice_id and voice_id not in voices and voice_id not in free_voice_ids:
+            voice_id = get_reserved(config, 'voice_id', default='', legacy_keys=('voice_id',))
+            if voice_id and not self.validate_voice_id(voice_id):
+                is_legacy = self.is_legacy_cosyvoice_id(voice_id)
                 logger.warning(
-                    "猫娘 '%s' 的 voice_id '%s' 在当前 API 的 voice_storage 中不存在，已清除",
+                    "猫娘 '%s' 的 voice_id '%s' 在当前 API 的 voice_storage 中不存在，已清除%s",
                     name,
                     voice_id,
+                    "（旧版 CosyVoice 音色）" if is_legacy else "",
                 )
-                config['voice_id'] = ''
+                set_reserved(config, 'voice_id', '')
                 cleaned_count += 1
+                if is_legacy:
+                    legacy_cosyvoice_names.append(name)
 
         if cleaned_count > 0:
             self.save_characters(character_data)
             logger.info("已清理 %d 个无效的 voice_id 引用", cleaned_count)
 
-        return cleaned_count
+        return cleaned_count, legacy_cosyvoice_names
 
     # --- Character metadata helpers ---
 
@@ -689,14 +1341,24 @@ class ConfigManager:
         name_mapping = {'human': master_name, 'system': "SYSTEM_MESSAGE"}
         lanlan_prompt_map = {}
         for name in catgirl_names:
-            prompt_value = catgirl_data.get(name, {}).get('system_prompt', lanlan_prompt)
+            stored_prompt = get_reserved(
+                catgirl_data.get(name, {}),
+                'system_prompt',
+                default=None,
+                legacy_keys=('system_prompt',),
+            )
+            if stored_prompt is None or is_default_prompt(stored_prompt):
+                prompt_value = get_lanlan_prompt()
+            else:
+                prompt_value = stored_prompt
             lanlan_prompt_map[name] = prompt_value
 
         memory_base = str(self.memory_dir)
-        semantic_store = {name: f'{memory_base}/semantic_memory_{name}' for name in catgirl_names}
-        time_store = {name: f'{memory_base}/time_indexed_{name}' for name in catgirl_names}
-        setting_store = {name: f'{memory_base}/settings_{name}.json' for name in catgirl_names}
-        recent_log = {name: f'{memory_base}/recent_{name}.json' for name in catgirl_names}
+        # 角色专属子目录: memory_dir/{name}/
+        import os as _os
+        time_store = {name: _os.path.join(memory_base, name, 'time_indexed.db') for name in catgirl_names}
+        setting_store = {name: _os.path.join(memory_base, name, 'settings.json') for name in catgirl_names}
+        recent_log = {name: _os.path.join(memory_base, name, 'recent.json') for name in catgirl_names}
 
         return (
             master_name,
@@ -705,7 +1367,6 @@ class ConfigManager:
             catgirl_data,
             name_mapping,
             lanlan_prompt_map,
-            semantic_store,
             time_store,
             setting_store,
             recent_log,
@@ -713,38 +1374,100 @@ class ConfigManager:
 
     # --- Core config helpers ---
 
-    # Cache for region check to avoid repeated calls (None = not checked, True/False = result)
+    # Combined region cache (None = not checked, True = non-mainland, False = mainland)
     _region_cache = None
-    
-    def _check_non_mainland(self) -> bool:
-        """Check if user is non-mainland China (cached, lazy evaluation)."""
-        if ConfigManager._region_cache is not None:
-            return ConfigManager._region_cache
-        
+    # Individual caches for dual check (None = not yet tried, True/False = result,
+    # _GEO_INDETERMINATE = tried but got no usable answer → do not retry)
+    _ip_check_cache = None
+    _steam_check_cache = None
+    # Sentinel stored in _ip_check_cache when the HTTP probe fails, so we never
+    # re-attempt it (and never pay the timeout again) within the same process.
+    _GEO_INDETERMINATE = object()
+    _geo_indeterminate_logged = False
+
+    @staticmethod
+    def _check_ip_non_mainland_http():
+        """Independent IP geolocation via China-fast HTTP API (ip-api.com over HTTP)."""
+        cache = ConfigManager._ip_check_cache
+        if cache is not None:
+            # True/False → deterministic result; sentinel → tried-and-failed, skip retry
+            return None if cache is ConfigManager._GEO_INDETERMINATE else cache
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                "http://ip-api.com/json/?fields=countryCode",
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            # 显式禁用代理，避免探测到代理服务器所在国家而非用户真实 IP 所在地。
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode())
+            country = (data.get("countryCode") or "").upper()
+            if country:
+                result = country != "CN"
+                ConfigManager._ip_check_cache = result
+                print(f"[GeoIP] HTTP IP check: country={country}, non_mainland={result}", file=sys.stderr)
+                return result
+        except Exception as e:
+            print(f"[GeoIP] HTTP IP check failed: {e}", file=sys.stderr)
+        # Mark as attempted-but-indeterminate so the network probe is never retried.
+        ConfigManager._ip_check_cache = ConfigManager._GEO_INDETERMINATE
+        return None
+
+    @staticmethod
+    def _check_steam_non_mainland():
+        """Steam-based IP country check via Steamworks SDK."""
+        if ConfigManager._steam_check_cache is not None:
+            return ConfigManager._steam_check_cache
         try:
             from main_routers.shared_state import get_steamworks
             steamworks = get_steamworks()
-            
             if steamworks is None:
-                return False  # Don't cache, retry next time
-            
+                return None
             ip_country = steamworks.Utils.GetIPCountry()
             if isinstance(ip_country, bytes):
                 ip_country = ip_country.decode('utf-8')
-            
-            result = (ip_country.upper() != 'CN') if ip_country else False
-            
-            print(f"[GeoIP] _check_non_mainland: country={ip_country}, non_mainland={result}", file=sys.stderr)
-            
-            ConfigManager._region_cache = result
-            return result
-            
+            if ip_country:
+                result = ip_country.upper() != "CN"
+                ConfigManager._steam_check_cache = result
+                print(f"[GeoIP] Steam IP check: country={ip_country}, non_mainland={result}", file=sys.stderr)
+                return result
         except ImportError:
-            return False  # Don't cache, module not available yet
+            pass
         except Exception as e:
-            print(f"[GeoIP] _check_non_mainland exception: {e}", file=sys.stderr)
+            print(f"[GeoIP] Steam IP check failed: {e}", file=sys.stderr)
+        return None
+
+    def _check_non_mainland(self) -> bool:
+        """Dual validation: both HTTP IP geo AND Steam geo must indicate non-mainland."""
+        if ConfigManager._region_cache is not None:
+            return ConfigManager._region_cache
+
+        ip_result = self._check_ip_non_mainland_http()
+        steam_result = self._check_steam_non_mainland()
+
+        if ip_result is True and steam_result is True:
+            ConfigManager._region_cache = True
+            ConfigManager._geo_indeterminate_logged = False
+            print(f"[GeoIP] Dual check PASS: non-mainland (IP={ip_result}, Steam={steam_result})", file=sys.stderr)
+            return True
+
+        if ip_result is False or steam_result is False:
+            ConfigManager._region_cache = False
+            ConfigManager._geo_indeterminate_logged = False
+            print(f"[GeoIP] Dual check FAIL: mainland (IP={ip_result}, Steam={steam_result})", file=sys.stderr)
             return False
-    
+
+        # Both sources simultaneously indeterminate (e.g. ip-api.com blocked AND Steam not
+        # yet initialised).  Do NOT write to _region_cache: Steam may initialise shortly
+        # after this call, and caching False here would permanently suppress re-evaluation.
+        # Callers that iterate get_core_config() will simply retry the geo check on the
+        # next invocation until at least one source becomes definitive.
+        if not ConfigManager._geo_indeterminate_logged:
+            ConfigManager._geo_indeterminate_logged = True
+            print(f"[GeoIP] Dual check indeterminate (IP={ip_result}, Steam={steam_result}), transient mainland default", file=sys.stderr)
+        return False
+
     def _adjust_free_api_url(self, url: str, is_free: bool) -> str:
         """Internal URL adjustment for free API users based on region."""
         if not url or 'lanlan.tech' not in url:
@@ -814,6 +1537,12 @@ class ConfigManager:
             'ASSIST_API_KEY_STEP': DEFAULT_CORE_API_KEY,
             'ASSIST_API_KEY_SILICON': DEFAULT_CORE_API_KEY,
             'ASSIST_API_KEY_GEMINI': DEFAULT_CORE_API_KEY,
+            'ASSIST_API_KEY_KIMI': DEFAULT_CORE_API_KEY,
+            'ASSIST_API_KEY_DEEPSEEK': DEFAULT_CORE_API_KEY,
+            'ASSIST_API_KEY_DOUBAO': DEFAULT_CORE_API_KEY,
+            'ASSIST_API_KEY_MINIMAX': '',
+            'ASSIST_API_KEY_MINIMAX_INTL': '',
+            'ASSIST_API_KEY_GROK': DEFAULT_CORE_API_KEY,
             'IS_FREE_VERSION': False,
             'VISION_MODEL': DEFAULT_VISION_MODEL,
             'AGENT_MODEL': DEFAULT_AGENT_MODEL,
@@ -835,6 +1564,9 @@ class ConfigManager:
             'REALTIME_MODEL_API_KEY': DEFAULT_REALTIME_MODEL_API_KEY,
             'TTS_MODEL_URL': DEFAULT_TTS_MODEL_URL,
             'TTS_MODEL_API_KEY': DEFAULT_TTS_MODEL_API_KEY,
+            'OPENCLAW_URL': "http://127.0.0.1:8089",
+            'OPENCLAW_TIMEOUT': 300.0,
+            'OPENCLAW_DEFAULT_SENDER_ID': "neko_user",
         }
 
         core_cfg = deepcopy(DEFAULT_CONFIG_DATA['core_config.json'])
@@ -866,9 +1598,29 @@ class ConfigManager:
         config['ASSIST_API_KEY_SILICON'] = core_cfg.get('assistApiKeySilicon', '') or config['CORE_API_KEY']
         config['ASSIST_API_KEY_GEMINI'] = core_cfg.get('assistApiKeyGemini', '') or config['CORE_API_KEY']
         config['ASSIST_API_KEY_KIMI'] = core_cfg.get('assistApiKeyKimi', '') or config['CORE_API_KEY']
+        config['ASSIST_API_KEY_DEEPSEEK'] = core_cfg.get('assistApiKeyDeepseek', '') or config['CORE_API_KEY']
+        config['ASSIST_API_KEY_DOUBAO'] = core_cfg.get('assistApiKeyDoubao', '') or config['CORE_API_KEY']
+        config['ASSIST_API_KEY_MINIMAX'] = core_cfg.get('assistApiKeyMinimax', '')
+        config['ASSIST_API_KEY_MINIMAX_INTL'] = core_cfg.get('assistApiKeyMinimaxIntl', '')
+        config['ASSIST_API_KEY_GROK'] = core_cfg.get('assistApiKeyGrok', '') or config['CORE_API_KEY']
 
         if core_cfg.get('mcpToken'):
             config['MCP_ROUTER_API_KEY'] = core_cfg['mcpToken']
+
+        openclaw_url = core_cfg.get('openclawUrl')
+        if isinstance(openclaw_url, str) and openclaw_url.strip():
+            config['OPENCLAW_URL'] = openclaw_url.strip()
+        try:
+            openclaw_timeout = core_cfg.get('openclawTimeout', config['OPENCLAW_TIMEOUT'])
+            openclaw_timeout = float(openclaw_timeout)
+            if not math.isfinite(openclaw_timeout) or openclaw_timeout <= 0:
+                raise ValueError("openclawTimeout must be a positive finite number")
+            config['OPENCLAW_TIMEOUT'] = openclaw_timeout
+        except (TypeError, ValueError):
+            config['OPENCLAW_TIMEOUT'] = 300.0
+        openclaw_sender = core_cfg.get('openclawDefaultSenderId')
+        if isinstance(openclaw_sender, str) and openclaw_sender.strip():
+            config['OPENCLAW_DEFAULT_SENDER_ID'] = openclaw_sender.strip()
 
         core_api_profiles = get_core_api_profiles()
         assist_api_profiles = get_assist_api_profiles()
@@ -924,68 +1676,80 @@ class ConfigManager:
         # 自定义API配置映射（使用大写下划线形式的内部键，且在未提供时保留已有默认值）
         enable_custom_api = core_cfg.get('enableCustomApi', False)
         config['ENABLE_CUSTOM_API'] = enable_custom_api
+
+        # 文本模式回复长度守卫上限（字/词数，超限会丢弃并重试）
+        try:
+            config['TEXT_GUARD_MAX_LENGTH'] = int(core_cfg.get('textGuardMaxLength', 300))
+            if config['TEXT_GUARD_MAX_LENGTH'] <= 0:
+                config['TEXT_GUARD_MAX_LENGTH'] = 300
+        except (TypeError, ValueError):
+            config['TEXT_GUARD_MAX_LENGTH'] = 300
         
         # 只有在启用自定义API时才允许覆盖各模型相关字段
         if enable_custom_api:
+            # API Key 字段：空字符串是合法值（本地服务商可能不需要 key），
+            # 因此不使用 or 回退，直接赋值。
+            # URL / Model ID 字段：空值回退到已有配置。
+
             # 文本对话模型 模型自定义配置映射
             if core_cfg.get('conversationModelApiKey') is not None:
-                config['CONVERSATION_MODEL_API_KEY'] = core_cfg.get('conversationModelApiKey', '') or config.get('CONVERSATION_MODEL_API_KEY', '')
+                config['CONVERSATION_MODEL_API_KEY'] = core_cfg.get('conversationModelApiKey', '')
             if core_cfg.get('conversationModelUrl') is not None:
                 config['CONVERSATION_MODEL_URL'] = core_cfg.get('conversationModelUrl', '') or config.get('CONVERSATION_MODEL_URL', '')
             if core_cfg.get('conversationModelId') is not None:
                 config['CONVERSATION_MODEL'] = core_cfg.get('conversationModelId', '') or config.get('CONVERSATION_MODEL', '')
-            
+
             # Summary（摘要）模型自定义配置映射
             if core_cfg.get('summaryModelApiKey') is not None:
-                config['SUMMARY_MODEL_API_KEY'] = core_cfg.get('summaryModelApiKey', '') or config.get('SUMMARY_MODEL_API_KEY', '')
+                config['SUMMARY_MODEL_API_KEY'] = core_cfg.get('summaryModelApiKey', '')
             if core_cfg.get('summaryModelUrl') is not None:
                 config['SUMMARY_MODEL_URL'] = core_cfg.get('summaryModelUrl', '') or config.get('SUMMARY_MODEL_URL', '')
             if core_cfg.get('summaryModelId') is not None:
                 config['SUMMARY_MODEL'] = core_cfg.get('summaryModelId', '') or config.get('SUMMARY_MODEL', '')
-            
+
             # Correction（纠错）模型自定义配置映射
             if core_cfg.get('correctionModelApiKey') is not None:
-                config['CORRECTION_MODEL_API_KEY'] = core_cfg.get('correctionModelApiKey', '') or config.get('CORRECTION_MODEL_API_KEY', '')
+                config['CORRECTION_MODEL_API_KEY'] = core_cfg.get('correctionModelApiKey', '')
             if core_cfg.get('correctionModelUrl') is not None:
                 config['CORRECTION_MODEL_URL'] = core_cfg.get('correctionModelUrl', '') or config.get('CORRECTION_MODEL_URL', '')
             if core_cfg.get('correctionModelId') is not None:
                 config['CORRECTION_MODEL'] = core_cfg.get('correctionModelId', '') or config.get('CORRECTION_MODEL', '')
-            
+
             # Emotion（情感分析）模型自定义配置映射
             if core_cfg.get('emotionModelApiKey') is not None:
-                config['EMOTION_MODEL_API_KEY'] = core_cfg.get('emotionModelApiKey', '') or config.get('EMOTION_MODEL_API_KEY', '')
+                config['EMOTION_MODEL_API_KEY'] = core_cfg.get('emotionModelApiKey', '')
             if core_cfg.get('emotionModelUrl') is not None:
                 config['EMOTION_MODEL_URL'] = core_cfg.get('emotionModelUrl', '') or config.get('EMOTION_MODEL_URL', '')
             if core_cfg.get('emotionModelId') is not None:
                 config['EMOTION_MODEL'] = core_cfg.get('emotionModelId', '') or config.get('EMOTION_MODEL', '')
-            
+
             # Vision（视觉）模型自定义配置映射
             if core_cfg.get('visionModelApiKey') is not None:
-                config['VISION_MODEL_API_KEY'] = core_cfg.get('visionModelApiKey', '') or config.get('VISION_MODEL_API_KEY', '')
+                config['VISION_MODEL_API_KEY'] = core_cfg.get('visionModelApiKey', '')
             if core_cfg.get('visionModelUrl') is not None:
                 config['VISION_MODEL_URL'] = core_cfg.get('visionModelUrl', '') or config.get('VISION_MODEL_URL', '')
             if core_cfg.get('visionModelId') is not None:
                 config['VISION_MODEL'] = core_cfg.get('visionModelId', '') or config.get('VISION_MODEL', '')
-            
+
             # Agent（智能体）模型自定义配置映射
             if core_cfg.get('agentModelApiKey') is not None:
-                config['AGENT_MODEL_API_KEY'] = core_cfg.get('agentModelApiKey', '') or config.get('AGENT_MODEL_API_KEY', '')
+                config['AGENT_MODEL_API_KEY'] = core_cfg.get('agentModelApiKey', '')
             if core_cfg.get('agentModelUrl') is not None:
                 config['AGENT_MODEL_URL'] = core_cfg.get('agentModelUrl', '') or config.get('AGENT_MODEL_URL', '')
             if core_cfg.get('agentModelId') is not None:
                 config['AGENT_MODEL'] = core_cfg.get('agentModelId', '') or config.get('AGENT_MODEL', '')
-            
+
             # Omni/Realtime（全模态/实时）模型自定义配置映射
             if core_cfg.get('omniModelApiKey') is not None:
-                config['REALTIME_MODEL_API_KEY'] = core_cfg.get('omniModelApiKey', '') or config.get('REALTIME_MODEL_API_KEY', '')
+                config['REALTIME_MODEL_API_KEY'] = core_cfg.get('omniModelApiKey', '')
             if core_cfg.get('omniModelUrl') is not None:
                 config['REALTIME_MODEL_URL'] = core_cfg.get('omniModelUrl', '') or config.get('REALTIME_MODEL_URL', '')
             if core_cfg.get('omniModelId') is not None:
                 config['REALTIME_MODEL'] = core_cfg.get('omniModelId', '') or config.get('REALTIME_MODEL', '')
-            
+
             # TTS 自定义配置映射
             if core_cfg.get('ttsModelApiKey') is not None:
-                config['TTS_MODEL_API_KEY'] = core_cfg.get('ttsModelApiKey', '') or config.get('TTS_MODEL_API_KEY', '')
+                config['TTS_MODEL_API_KEY'] = core_cfg.get('ttsModelApiKey', '')
             if core_cfg.get('ttsModelUrl') is not None:
                 config['TTS_MODEL_URL'] = core_cfg.get('ttsModelUrl', '') or config.get('TTS_MODEL_URL', '')
             if core_cfg.get('ttsModelId') is not None:
@@ -998,6 +1762,10 @@ class ConfigManager:
         for key, value in config.items():
             if key.endswith('_URL') and isinstance(value, str):
                 config[key] = self._adjust_free_api_url(value, True)
+
+        # Agent model always uses international API regardless of region
+        if isinstance(config.get('AGENT_MODEL_URL'), str):
+            config['AGENT_MODEL_URL'] = config['AGENT_MODEL_URL'].replace('lanlan.tech', 'lanlan.app')
 
         return config
 
@@ -1098,19 +1866,20 @@ class ConfigManager:
         
         mapping = model_type_mapping[model_type]
         
-        # agent 不依赖 enable_custom_api 开关；其余模型遵循原逻辑
+        # agent 始终走专用字段（AGENT_MODEL_URL 有 lanlan.app 归一化），
+        # 但 is_custom 仅在 enableCustomApi 开启时为 True。
         if enable_custom_api or model_type == 'agent':
             custom_model = core_config.get(mapping['custom_model'], '')
             custom_url = core_config.get(mapping['custom_url'], '')
             custom_key = core_config.get(mapping['custom_key'], '')
-            
+
             # 自定义配置完整时使用自定义配置
             if custom_model and custom_url:
                 return {
                     'model': custom_model,
                     'api_key': custom_key,
                     'base_url': custom_url,
-                    'is_custom': True,
+                    'is_custom': enable_custom_api,
                     # 对于 realtime 模型，自定义配置时 api_type 设为 'local'
                     # TODO: 后续完善 'local' 类型的具体实现（如本地推理服务等）
                     'api_type': 'local' if model_type == 'realtime' else None,
@@ -1238,8 +2007,7 @@ class ConfigManager:
             used += units
             data = {"date": today, "used": used}
             try:
-                with open(quota_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
+                atomic_write_json(quota_path, data, ensure_ascii=False, indent=2)
             except Exception as e:
                 logger.warning("保存 Agent 配额计数失败: %s", e)
 
@@ -1292,9 +2060,7 @@ class ConfigManager:
         config_path = self.config_dir / filename
         
         try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-                f.flush()  # 强制刷新缓冲区
+            atomic_write_json(config_path, data, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"Error saving {filename}: {e}", file=sys.stderr)
             raise
@@ -1333,6 +2099,7 @@ class ConfigManager:
             "app_dir": str(self.app_docs_dir),
             "config_dir": str(self.config_dir),
             "memory_dir": str(self.memory_dir),
+            "plugins_dir": str(self.plugins_dir),
             "live2d_dir": str(self.live2d_dir),
             "workshop_dir": str(self.workshop_dir),
             "chara_dir": str(self.chara_dir),
@@ -1400,7 +2167,7 @@ class ConfigManager:
                 logger.error(f"删除非法workshop配置文件失败: {config_path}, error={delete_error}")
                 return False
 
-        path_keys = ("user_mod_folder", "WORKSHOP_PATH", "steam_workshop_path", "default_workshop_folder")
+        path_keys = ("user_mod_folder", "steam_workshop_path", "default_workshop_folder")
         for key in path_keys:
             if key not in config_data:
                 continue
@@ -1436,24 +2203,36 @@ class ConfigManager:
         Returns:
             dict: workshop配置数据
         """
-        # 兼容历史错误配置：无论配置位于文档目录还是软件目录，先做一次自愈清理
-        self._cleanup_invalid_workshop_configs()
+        # 兼容历史错误配置：仅在进程内首次读取时自愈一次，避免高频读取重复触发清理逻辑
+        if not self._workshop_config_cleanup_done:
+            with self._workshop_config_lock:
+                if not self._workshop_config_cleanup_done:
+                    self._cleanup_invalid_workshop_configs()
+                    self._workshop_config_cleanup_done = True
 
         config_path = self.get_workshop_config_path()
         try:
             if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                    logger.info(f"成功加载workshop配置: {config}")
+                    logger.debug(f"成功加载workshop配置: {config}")
                     return config
             else:
-                # 如果配置文件不存在，返回默认配置
-                default_config = {
-                    "default_workshop_folder": str(self.workshop_dir),
-                    "auto_create_folder": True
-                }
-                logger.info(f"创建默认workshop配置: {default_config}")
-                return default_config
+                # 配置不存在时进行一次带锁初始化，避免并发/密集调用下重复创建默认配置
+                with self._workshop_config_lock:
+                    if os.path.exists(config_path):
+                        with open(config_path, 'r', encoding='utf-8') as f:
+                            config = json.load(f)
+                            logger.debug(f"成功加载workshop配置: {config}")
+                            return config
+
+                    default_config = {
+                        "default_workshop_folder": str(self.workshop_dir),
+                        "auto_create_folder": True
+                    }
+                    self.save_workshop_config(default_config)
+                    logger.info(f"创建默认workshop配置: {default_config}")
+                    return default_config
         except Exception as e:
             error_msg = f"加载workshop配置失败: {e}"
             logger.error(error_msg)
@@ -1477,8 +2256,7 @@ class ConfigManager:
             os.makedirs(os.path.dirname(config_path), exist_ok=True)
             
             # 保存配置
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, indent=4, ensure_ascii=False)
+            atomic_write_json(config_path, config_data, indent=4, ensure_ascii=False)
             
             logger.info(f"成功保存workshop配置: {config_data}")
         except Exception as e:
@@ -1489,26 +2267,60 @@ class ConfigManager:
     
     def save_workshop_path(self, workshop_path):
         """
-        保存workshop根目录路径到配置文件
+        设置Steam创意工坊根目录路径（运行时变量，不写入配置文件）
         
         Args:
-            workshop_path: workshop根目录路径
+            workshop_path: Steam创意工坊根目录路径
         """
-        config = self.load_workshop_config()
-        config["WORKSHOP_PATH"] = workshop_path
-        self.save_workshop_config(config)
-        logger.info(f"已将workshop路径保存到配置文件: {workshop_path}")
+        self._steam_workshop_path = workshop_path
+        logger.info(f"已设置Steam创意工坊路径（运行时）: {workshop_path}")
+
+    def persist_user_workshop_folder(self, workshop_path):
+        """
+        将Steam创意工坊实际路径持久化到配置文件（每次启动仅首次写入）。
+
+        仅在动态获取Steam工坊位置成功时调用，后续读取可在Steam未运行时作为回退。
+        """
+        if self._user_workshop_folder_persisted:
+            return
+        if not workshop_path or not os.path.isdir(workshop_path):
+            return
+        self._user_workshop_folder_persisted = True
+        try:
+            config = self.load_workshop_config()
+            config["user_workshop_folder"] = workshop_path
+            self.save_workshop_config(config)
+            logger.info(f"已持久化Steam创意工坊路径到配置文件: {workshop_path}")
+        except Exception as e:
+            logger.error(f"持久化user_workshop_folder失败: {e}")
+
+    def get_steam_workshop_path(self):
+        """
+        获取Steam创意工坊根目录路径（仅运行时，由启动流程设置）
+        
+        Returns:
+            str | None: Steam创意工坊根目录路径
+        """
+        return self._steam_workshop_path
     
     def get_workshop_path(self):
         """
-        获取保存的workshop根目录路径
+        获取workshop根目录路径
+        
+        优先级: user_mod_folder(配置) > Steam运行时路径 > user_workshop_folder(缓存文件) > default_workshop_folder(配置) > self.workshop_dir
         
         Returns:
             str: workshop根目录路径
         """
         config = self.load_workshop_config()
-        # 优先使用user_mod_folder，然后是WORKSHOP_PATH，然后是default_workshop_folder，最后使用self.workshop_dir
-        return config.get("user_mod_folder", config.get("WORKSHOP_PATH", config.get("default_workshop_folder", str(self.workshop_dir))))
+        if config.get("user_mod_folder"):
+            return config["user_mod_folder"]
+        if self._steam_workshop_path:
+            return self._steam_workshop_path
+        cached = config.get("user_workshop_folder")
+        if cached and os.path.isdir(cached):
+            return cached
+        return config.get("default_workshop_folder", str(self.workshop_dir))
 
 
 # 全局配置管理器实例
@@ -1532,6 +2344,13 @@ def get_config_path(filename):
     return get_config_manager().get_config_path(filename)
 
 
+def get_plugins_directory(app_name=None):
+    """获取用户插件根目录，默认位于应用文档目录下的 ``plugins``。"""
+    manager = ConfigManager(app_name)
+    manager.ensure_plugins_directory()
+    return manager.plugins_dir
+
+
 def load_json_config(filename, default_value=None):
     """加载JSON配置"""
     return get_config_manager().load_json_config(filename, default_value)
@@ -1551,8 +2370,16 @@ def save_workshop_config(config_data):
     return get_config_manager().save_workshop_config(config_data)
 
 def save_workshop_path(workshop_path):
-    """保存workshop根目录路径"""
+    """设置Steam创意工坊根目录路径（运行时）"""
     return get_config_manager().save_workshop_path(workshop_path)
+
+def persist_user_workshop_folder(workshop_path):
+    """将Steam创意工坊实际路径持久化到配置文件（每次启动仅首次写入）"""
+    return get_config_manager().persist_user_workshop_folder(workshop_path)
+
+def get_steam_workshop_path():
+    """获取Steam创意工坊根目录路径（运行时）"""
+    return get_config_manager().get_steam_workshop_path()
 
 def get_workshop_path():
     """获取workshop根目录路径"""
@@ -1571,4 +2398,3 @@ if __name__ == "__main__":
                 print(f"  {k}: {v}")
         else:
             print(f"{key}: {value}")
-

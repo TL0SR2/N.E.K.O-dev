@@ -8,12 +8,14 @@ from typing import Dict, List, Optional
 import pytest
 
 from tests.unit.test_text_chat import (
+    OfflineClientError,
     create_offline_client,
     test_multi_turn_conversation,
     test_simple_text_chat,
     test_vision_chat,
 )
 from tests.utils.llm_judger import LLMJudger
+from utils.file_utils import atomic_write_json
 
 
 # Configure model targets here.
@@ -122,7 +124,7 @@ async def _run_target_suite(judger: LLMJudger, target: Dict[str, Optional[str]])
     judger.set_run_tag(tag)
     try:
         client = create_offline_client(test_provider=provider, model_override=model_override)
-    except pytest.skip.Exception as e:
+    except (OfflineClientError, pytest.skip.Exception) as e:
         print(f"[SKIP] target {tag}: {e}")
         return {"target": tag, "simple": "skipped", "multi_turn": "skipped", "vision": "skipped"}
 
@@ -208,8 +210,7 @@ def _append_comparison_to_reports(md_path: Path, comparison: List[Dict]) -> None
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         data["model_comparison"] = comparison
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        atomic_write_json(json_path, data, ensure_ascii=False, indent=2)
 
     md_lines = [
         "",

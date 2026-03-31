@@ -1,23 +1,23 @@
 # -- coding: utf-8 --
 
 import asyncio
-import logging
+import json
 from typing import Optional, Callable, Dict, Any, Awaitable
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from utils.llm_client import SystemMessage, HumanMessage, AIMessage, create_chat_llm
 from openai import APIConnectionError, InternalServerError, RateLimitError
-from config import get_extra_body
 from utils.frontend_utils import calculate_text_similarity, count_words_and_chars
+from utils.logger_config import get_module_logger
+from utils.token_tracker import set_call_type
 
 # Setup logger for this module
-logger = logging.getLogger(__name__)
+logger = get_module_logger(__name__, "Main")
 
 class OmniOfflineClient:
     """
     A client for text-based chat that mimics the interface of OmniRealtimeClient.
     
     This class provides a compatible interface with OmniRealtimeClient but uses
-    langchain's ChatOpenAI with OpenAI-compatible API instead of realtime WebSocket,
+    ChatOpenAI with OpenAI-compatible API instead of realtime WebSocket,
     suitable for text-only conversations.
     
     Attributes:
@@ -34,7 +34,7 @@ class OmniOfflineClient:
         vision_api_key (str):
             Optional separate API key for vision model.
         llm (ChatOpenAI):
-            Langchain ChatOpenAI client for streaming text generation.
+            ChatOpenAI client for streaming text generation.
         on_text_delta (Callable[[str, bool], Awaitable[None]]):
             Callback for text delta events.
         on_input_transcript (Callable[[str], Awaitable[None]]):
@@ -65,8 +65,11 @@ class OmniOfflineClient:
         on_response_done: Optional[Callable[[], Awaitable[None]]] = None,
         on_repetition_detected: Optional[Callable[[], Awaitable[None]]] = None,
         on_response_discarded: Optional[Callable[[str, int, int, bool, Optional[str]], Awaitable[None]]] = None,
+        on_status_message: Optional[Callable[[str], Awaitable[None]]] = None,
         extra_event_handlers: Optional[Dict[str, Callable[[Dict[str, Any]], Awaitable[None]]]] = None,
-        max_response_length: Optional[int] = None
+        max_response_length: Optional[int] = None,
+        lanlan_name: str = "",
+        master_name: str = ""
     ):
         # Use base_url directly without conversion
         self.base_url = base_url
@@ -80,19 +83,16 @@ class OmniOfflineClient:
         self.on_input_transcript = on_input_transcript
         self.on_output_transcript = on_output_transcript
         self.handle_connection_error = on_connection_error
+        self.on_status_message = on_status_message
         self.on_response_done = on_response_done
+        self.on_proactive_done: Optional[Callable[[], Awaitable[None]]] = None
         self.on_repetition_detected = on_repetition_detected
         self.on_response_discarded = on_response_discarded
         
-        # Initialize langchain ChatOpenAI client
-        self.llm = ChatOpenAI(
-            model=self.model,
-            base_url=self.base_url,
-            api_key=self.api_key,
-            temperature=1.0,
-            streaming=True,
-            max_retries=0,  # 禁用 openai client 内置重试，由外层 retry loop 处理（内置重试会破坏流式 generator）
-            extra_body=get_extra_body(self.model) or None
+        # Initialize ChatOpenAI client
+        self.llm = create_chat_llm(
+            self.model, self.base_url, self.api_key,
+            temperature=1.0, streaming=True, max_retries=0,
         )
         
         # State management
@@ -109,11 +109,28 @@ class OmniOfflineClient:
         
         # ========== 普通对话守卫配置 ==========
         self.enable_response_guard = True     # 是否启用质量守卫
-        self.max_response_length = max_response_length if isinstance(max_response_length, int) and max_response_length > 0 else 200
+        self.max_response_length = max_response_length if isinstance(max_response_length, int) and max_response_length > 0 else 300
         self.max_response_rerolls = 2         # 最多允许的自动重试次数
-        
+
+        # ========== 输出前缀检测 ==========
+        self.lanlan_name = lanlan_name
+        self.master_name = master_name
+        self._prefix_buffer_size = max(len(lanlan_name), len(master_name)) + 3 if (lanlan_name or master_name) else 0
+
         # 质量守卫回调：由 core.py 设置，用于通知前端清理气泡
-        
+
+    def _match_name_prefix(self, text: str, name: str) -> int:
+        """Check if text starts with a name prefix like 'Name | ' or 'Name |'.
+        Returns the length of the matched prefix, or 0 if no match.
+        Handles variants with/without spaces around the pipe character.
+        """
+        if not name:
+            return 0
+        for variant in (f"{name} | ", f"{name} |", f"{name}| ", f"{name}|"):
+            if text.startswith(variant):
+                return len(variant)
+        return 0
+
     async def connect(self, instructions: str, native_audio=False) -> None:
         """Initialize the client with system instructions."""
         self._instructions = instructions
@@ -135,19 +152,18 @@ class OmniOfflineClient:
             if self._conversation_history and isinstance(self._conversation_history[0], SystemMessage):
                 self._conversation_history[0] = SystemMessage(content=self._instructions)
     
-    def switch_model(self, new_model: str, use_vision_config: bool = False) -> None:
+    async def switch_model(self, new_model: str, use_vision_config: bool = False) -> None:
         """
         Temporarily switch to a different model (e.g., vision model).
         This allows dynamic model switching for vision tasks.
-        
+
         Args:
             new_model: The model to switch to
             use_vision_config: If True, use vision_base_url and vision_api_key
         """
         if new_model and new_model != self.model:
             logger.info(f"Switching model from {self.model} to {new_model}")
-            self.model = new_model
-            
+
             # 选择使用的 API 配置
             if use_vision_config:
                 base_url = self.vision_base_url
@@ -155,17 +171,19 @@ class OmniOfflineClient:
             else:
                 base_url = self.base_url
                 api_key = self.api_key
-            
-            # Recreate LLM instance with new model and config
-            self.llm = ChatOpenAI(
-                model=self.model,
-                base_url=base_url,
-                api_key=api_key,
-                temperature=1.0,
-                streaming=True,
-                max_retries=0,  # 禁用内置重试
-                extra_body=get_extra_body(self.model) or None
+
+            # 先创建新 client，成功后再原子替换，避免半切换状态
+            new_llm = create_chat_llm(
+                new_model, base_url, api_key,
+                temperature=1.0, streaming=True, max_retries=0,
             )
+            old_llm = self.llm
+            self.llm = new_llm
+            self.model = new_model
+            try:
+                await old_llm.aclose()
+            except Exception as e:
+                logger.warning(f"switch_model: old client aclose failed: {e}")
     
     async def _check_repetition(self, response: str) -> bool:
         """
@@ -239,7 +257,7 @@ class OmniOfflineClient:
             # (cannot switch back because image data remains in conversation history)
             if self.vision_model and self.vision_model != self.model:
                 logger.info(f"🖼️ Temporarily switching to vision model: {self.vision_model} (from {self.model})")
-                self.switch_model(self.vision_model, use_vision_config=True)
+                await self.switch_model(self.vision_model, use_vision_config=True)
             
             # Multi-modal message: images + text
             content = []
@@ -278,21 +296,23 @@ class OmniOfflineClient:
         max_retries = 3
         retry_delays = [1, 2]
         assistant_message = ""
+        status_reported = False
+        guard_exhausted = False
         
         try:
             self._is_responding = True
             reroll_count = 0
-            
+            set_call_type("conversation")
+
             # 防御性检查：确保对话历史中至少有用户消息
             has_user_message = any(isinstance(msg, HumanMessage) for msg in self._conversation_history)
             if not has_user_message:
                 error_msg = "对话历史中没有用户消息，无法生成回复"
                 logger.error(f"OmniOfflineClient: {error_msg}")
-                if self.handle_connection_error:
-                    await self.handle_connection_error(error_msg)
+                if self.on_status_message:
+                    await self.on_status_message(json.dumps({"code": "NO_USER_MESSAGE"}))
+                    status_reported = True
                 return
-            
-            guard_exhausted = False
             for attempt in range(max_retries):
                 try:
                     assistant_message = ""
@@ -305,33 +325,67 @@ class OmniOfflineClient:
                         fence_triggered = False  # 围栏是否已触发
                         guard_triggered = False
                         discard_reason = None
-                        
+                        chunk_usage = None
+                        prefix_buffer = ""
+                        prefix_checked = not bool(self._prefix_buffer_size)
+
                         async for chunk in self.llm.astream(self._conversation_history):
+                            if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+                                chunk_usage = chunk.usage_metadata
+                                logger.debug(f"🔍 [Usage] {chunk_usage}")
+                            if hasattr(chunk, 'response_metadata') and chunk.response_metadata:
+                                if 'token_usage' in chunk.response_metadata or 'usage' in chunk.response_metadata:
+                                    logger.debug(f"🔍 [Meta] {chunk.response_metadata}")
                             if not self._is_responding:
                                 break
-                            
+
                             if fence_triggered:
                                 break
-                            
+
                             content = chunk.content if hasattr(chunk, 'content') else str(chunk)
-                            
+
                             if content and content.strip():
                                 truncated_content = content
-                                for idx, char in enumerate(content):
+
+                                # ── 前缀检测阶段：缓冲初始输出，判断是否有角色名前缀 ──
+                                if not prefix_checked:
+                                    prefix_buffer += truncated_content
+                                    if len(prefix_buffer) >= self._prefix_buffer_size:
+                                        prefix_checked = True
+                                        master_match = self._match_name_prefix(prefix_buffer, self.master_name)
+                                        lanlan_match = self._match_name_prefix(prefix_buffer, self.lanlan_name)
+                                        if master_match:
+                                            guard_triggered = True
+                                            discard_reason = "role_hallucination"
+                                            logger.info(f"OmniOfflineClient: 检测到主人名前缀 '{prefix_buffer[:master_match]}'，触发重试")
+                                            self._is_responding = False
+                                            break
+                                        elif lanlan_match:
+                                            logger.info(f"OmniOfflineClient: 剥离角色名前缀 '{prefix_buffer[:lanlan_match]}'")
+                                            truncated_content = prefix_buffer[lanlan_match:]
+                                        else:
+                                            truncated_content = prefix_buffer
+                                        # 前缀解析完毕，将结果送入下方的通用 emit/guard 路径
+                                        if not (truncated_content and truncated_content.strip()):
+                                            continue
+                                    else:
+                                        continue  # 缓冲区未满，等更多 chunk
+
+                                for idx, char in enumerate(truncated_content):
                                     if char == '|':
                                         pipe_count += 1
                                         if pipe_count >= 2:
-                                            truncated_content = content[:idx]
+                                            truncated_content = truncated_content[:idx]
                                             fence_triggered = True
                                             logger.info("OmniOfflineClient: 围栏触发 - 检测到第二个 | 字符，截断输出")
                                             break
-                                
+
                                 if truncated_content and truncated_content.strip():
                                     assistant_message += truncated_content
                                     if self.on_text_delta:
                                         await self.on_text_delta(truncated_content, is_first_chunk)
                                     is_first_chunk = False
-                                    
+
                                     if self.enable_response_guard:
                                         current_length = count_words_and_chars(assistant_message)
                                         if current_length > self.max_response_length:
@@ -342,12 +396,50 @@ class OmniOfflineClient:
                                             break
                             elif content and not content.strip():
                                 logger.debug(f"OmniOfflineClient: 过滤空白内容 - content_repr: {repr(content)[:100]}")
-                        
+
+                        # 流结束后：flush 未处理的前缀缓冲区（走通用 emit/guard 路径）
+                        if prefix_buffer and not prefix_checked:
+                            prefix_checked = True
+                            master_match = self._match_name_prefix(prefix_buffer, self.master_name)
+                            lanlan_match = self._match_name_prefix(prefix_buffer, self.lanlan_name)
+                            if master_match:
+                                guard_triggered = True
+                                discard_reason = "role_hallucination"
+                                logger.info(f"OmniOfflineClient: 流结束时检测到主人名前缀 '{prefix_buffer[:master_match]}'，触发重试")
+                            else:
+                                flush_text = prefix_buffer
+                                if lanlan_match:
+                                    logger.info(f"OmniOfflineClient: 流结束时剥离角色名前缀 '{prefix_buffer[:lanlan_match]}'")
+                                    flush_text = prefix_buffer[lanlan_match:]
+                                # fence + length guard
+                                for idx, char in enumerate(flush_text):
+                                    if char == '|':
+                                        pipe_count += 1
+                                        if pipe_count >= 2:
+                                            flush_text = flush_text[:idx]
+                                            fence_triggered = True
+                                            break
+                                if flush_text and flush_text.strip():
+                                    assistant_message += flush_text
+                                    if self.on_text_delta:
+                                        await self.on_text_delta(flush_text, is_first_chunk)
+                                    is_first_chunk = False
+                                    if self.enable_response_guard:
+                                        current_length = count_words_and_chars(assistant_message)
+                                        if current_length > self.max_response_length:
+                                            guard_triggered = True
+                                            discard_reason = f"length>{self.max_response_length}"
+
                         if guard_triggered:
                             guard_attempt += 1
                             reroll_count += 1
                             will_retry = guard_attempt <= self.max_response_rerolls
-                            failure_message = None if will_retry else "AI回复异常，已放弃输出"
+                            # 区分原因：超长用明确提示，其它守卫原因用通用提示
+                            if discard_reason and "length>" in discard_reason:
+                                final_message = json.dumps({"code": "RESPONSE_TOO_LONG"})
+                            else:
+                                final_message = json.dumps({"code": "RESPONSE_INVALID"})
+                            failure_message = None if will_retry else final_message
                             await self._notify_response_discarded(
                                 discard_reason or "guard",
                                 guard_attempt,
@@ -361,12 +453,16 @@ class OmniOfflineClient:
                                 continue
                             
                             logger.warning("OmniOfflineClient: guard 重试耗尽，放弃输出")
-                            if self.handle_connection_error:
-                                await self.handle_connection_error("AI回复异常，已放弃输出")
+                            if self.on_status_message:
+                                await self.on_status_message(final_message)
+                                status_reported = True
                             assistant_message = ""
                             guard_exhausted = True
                             break
                         
+                        # Token usage 由 _AsyncStreamWrapper hook 在流结束时自动记录，
+                        # 此处不再手动调用 TokenTracker.record() 避免双重计数。
+
                         if assistant_message:
                             self._conversation_history.append(AIMessage(content=assistant_message))
                             await self._check_repetition(assistant_message)
@@ -379,36 +475,36 @@ class OmniOfflineClient:
                         break
                             
                 except (APIConnectionError, InternalServerError, RateLimitError) as e:
-                    logger.info(f"ℹ️ 捕获到 {type(e).__name__} 错误")
+                    error_type = type(e).__name__
+                    logger.info(f"ℹ️ 捕获到 {error_type} 错误")
                     if attempt < max_retries - 1:
                         wait_time = retry_delays[attempt]
                         logger.warning(f"OmniOfflineClient: LLM调用失败 (尝试 {attempt + 1}/{max_retries})，{wait_time}秒后重试: {e}")
-                        # 通知前端正在重试
-                        if self.handle_connection_error:
-                            await self.handle_connection_error(f"连接问题，正在重试...（第{attempt + 1}次）")
+                        if self.on_status_message:
+                            await self.on_status_message(json.dumps({"code": "LLM_RETRY", "details": {"error_type": error_type, "attempt": attempt + 1, "max_retries": max_retries}}))
                         await asyncio.sleep(wait_time)
-                        continue  # 继续下一次重试
+                        continue
                     else:
-                        error_msg = f"LLM调用失败，已重试{max_retries}次: {str(e)}"
+                        error_msg = f"💥 LLM连接失败（{error_type}），已重试{max_retries}次: {e}"
                         logger.error(error_msg)
-                        if self.handle_connection_error:
-                            await self.handle_connection_error(error_msg)
+                        if self.on_status_message:
+                            await self.on_status_message(json.dumps({"code": "LLM_CONNECTION_EXHAUSTED", "details": {"error_type": error_type, "max_retries": max_retries, "error": str(e)}}))
+                            status_reported = True
                         break
                 except Exception as e:
-                    error_msg = f"Error in text streaming: {str(e)}"
+                    error_msg = f"💥 文本生成异常: {type(e).__name__}: {e}"
                     logger.error(error_msg)
-                    if self.handle_connection_error:
-                        await self.handle_connection_error(error_msg)
-                    break  # 非重试类错误直接退出
+                    if self.on_status_message:
+                        await self.on_status_message(json.dumps({"code": "TEXT_GEN_ERROR", "details": {"error_type": type(e).__name__, "error": str(e)}}))
+                        status_reported = True
+                    break
         finally:
             self._is_responding = False
             
-            # 空回复兜底：如果所有重试都未产生文本，向前端发送错误提示
-            if not assistant_message and not guard_exhausted:
+            if not assistant_message and not guard_exhausted and not status_reported:
                 logger.warning("OmniOfflineClient: 所有重试均未产生文本回复")
-                if self.on_text_delta:
-                    fallback_msg = "（服务暂时不稳定，请再试一次）"
-                    await self.on_text_delta(fallback_msg, True)
+                if self.on_status_message:
+                    await self.on_status_message(json.dumps({"code": "LLM_NO_RESPONSE"}))
             
             # Call response done callback
             if self.on_response_done:
@@ -455,7 +551,10 @@ class OmniOfflineClient:
         It is **not** persisted to _conversation_history.  Only the AI's
         natural-language response (AIMessage) is kept in history.
 
-        Calls on_response_done() when finished (same as stream_text).
+        Calls on_proactive_done() when finished — a lightweight callback that only
+        flushes TTS and sends turn_end to the frontend, WITHOUT triggering hot-swap
+        or analyze_request logic.  Falls back to on_response_done() if
+        on_proactive_done is not set.
         Returns True if any text was generated, False if aborted or empty.
         """
         if not instruction or not instruction.strip():
@@ -470,31 +569,88 @@ class OmniOfflineClient:
 
         assistant_message = ""
         is_first_chunk = True
+        chunk_usage = None
+        prefix_buffer = ""
+        prefix_checked = not bool(self._prefix_buffer_size)
 
         try:
             self._is_responding = True
+            set_call_type("proactive")
             async for chunk in self.llm.astream(messages_to_send):
+                if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+                    chunk_usage = chunk.usage_metadata
+                    logger.debug(f"🔍 [Usage-Proactive] {chunk_usage}")
+                if hasattr(chunk, 'response_metadata') and chunk.response_metadata:
+                    if 'token_usage' in chunk.response_metadata or 'usage' in chunk.response_metadata:
+                        logger.debug(f"🔍 [Meta-Proactive] {chunk.response_metadata}")
+
                 if not self._is_responding:
                     break
                 content = chunk.content if hasattr(chunk, "content") else str(chunk)
                 if content and content.strip():
-                    assistant_message += content
+                    emit_content = content
+
+                    # ── 前缀检测阶段：缓冲初始输出，剥离角色名前缀 ──
+                    if not prefix_checked:
+                        prefix_buffer += emit_content
+                        if len(prefix_buffer) >= self._prefix_buffer_size:
+                            prefix_checked = True
+                            master_match = self._match_name_prefix(prefix_buffer, self.master_name)
+                            lanlan_match = self._match_name_prefix(prefix_buffer, self.lanlan_name)
+                            if master_match:
+                                logger.info(f"OmniOfflineClient.stream_proactive: 剥离主人名前缀 '{prefix_buffer[:master_match]}'")
+                                emit_content = prefix_buffer[master_match:]
+                            elif lanlan_match:
+                                logger.info(f"OmniOfflineClient.stream_proactive: 剥离角色名前缀 '{prefix_buffer[:lanlan_match]}'")
+                                emit_content = prefix_buffer[lanlan_match:]
+                            else:
+                                emit_content = prefix_buffer
+                            if not (emit_content and emit_content.strip()):
+                                continue
+                        else:
+                            continue  # 缓冲区未满，等更多 chunk
+
+                    assistant_message += emit_content
                     if self.on_text_delta:
-                        await self.on_text_delta(content, is_first_chunk)
+                        await self.on_text_delta(emit_content, is_first_chunk)
+                    is_first_chunk = False
+
+            # ── flush 前缀缓冲区（流提前结束时） ──
+            if prefix_buffer and not prefix_checked:
+                prefix_checked = True
+                master_match = self._match_name_prefix(prefix_buffer, self.master_name)
+                lanlan_match = self._match_name_prefix(prefix_buffer, self.lanlan_name)
+                if master_match:
+                    logger.info(f"OmniOfflineClient.stream_proactive: 流结束时剥离主人名前缀")
+                    flush_text = prefix_buffer[master_match:]
+                elif lanlan_match:
+                    logger.info(f"OmniOfflineClient.stream_proactive: 流结束时剥离角色名前缀")
+                    flush_text = prefix_buffer[lanlan_match:]
+                else:
+                    flush_text = prefix_buffer
+                if flush_text and flush_text.strip():
+                    assistant_message += flush_text
+                    if self.on_text_delta:
+                        await self.on_text_delta(flush_text, is_first_chunk)
                     is_first_chunk = False
         except Exception as e:
             error_msg = f"OmniOfflineClient.stream_proactive error: {e}"
             logger.error(error_msg)
-            if self.handle_connection_error:
-                await self.handle_connection_error(error_msg)
-            assistant_message = ""  # 防止残缺内容被 finally 写入历史
+            if self.on_status_message:
+                await self.on_status_message(json.dumps({"code": "PROACTIVE_GEN_FAILED", "details": {"error_type": type(e).__name__, "error": str(e)}}))
+            assistant_message = ""
             return False
         finally:
             self._is_responding = False
+            # Token usage 由 _AsyncStreamWrapper hook 在流结束时自动记录，
+            # 此处不再手动调用 TokenTracker.record() 避免双重计数。
             if assistant_message:
                 self._conversation_history.append(AIMessage(content=assistant_message))
-            if self.on_response_done:
-                await self.on_response_done()
+            # Use lightweight proactive-done callback (TTS flush + turn_end only),
+            # falling back to full on_response_done for backward compatibility.
+            done_cb = getattr(self, "on_proactive_done", None) or self.on_response_done
+            if done_cb:
+                await done_cb()
 
         return bool(assistant_message)
 
@@ -528,4 +684,10 @@ class OmniOfflineClient:
         self._is_responding = False
         self._conversation_history = []
         self._pending_images.clear()
+        if self.llm:
+            try:
+                await self.llm.aclose()
+            except Exception as e:
+                logger.warning(f"OmniOfflineClient.close: aclose failed: {e}")
+            self.llm = None
         logger.info("OmniOfflineClient closed")

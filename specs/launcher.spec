@@ -69,11 +69,18 @@ def add_data(src, dest):
     else:
         print(f"[Build] Warning: {src_path} not found, skipping")
 
+add_data('static/css', 'static/css')
+add_data('static/js', 'static/js')
+add_data('static/fonts', 'static/fonts')
+add_data('static/vrm', 'static/vrm')
 add_data('static/mao_pro', 'static/mao_pro')
 add_data('static/ziraitikuwa', 'static/ziraitikuwa') 
 add_data('static/libs', 'static/libs')
 add_data('static/icons', 'static/icons')
 add_data('static/locales', 'static/locales')
+add_data('static/neko', 'static/neko')
+add_data('static/kemomimi', 'static/kemomimi')
+add_data('static/default', 'static/default')
 add_data('static/*.js', 'static')
 add_data('static/*.json', 'static')
 add_data('static/*.ico', 'static')
@@ -88,7 +95,7 @@ add_data('steam_appid.txt', '.')
 if sys.platform == 'darwin':
     # macOS (Apple Silicon) 使用 .dylib
     libsteam_api = os.path.join(PROJECT_ROOT, 'libsteam_api.dylib')
-    libSteamworksPy = os.path.join(PROJECT_ROOT, 'libSteamworksPy.dylib')
+    libSteamworksPy = os.path.join(PROJECT_ROOT, 'SteamworksPy.dylib')
     if os.path.exists(libsteam_api):
         binaries.append((libsteam_api, '.'))
     if os.path.exists(libSteamworksPy):
@@ -164,12 +171,6 @@ hiddenimports += [
     'typeguard._decorators',
     'requests',
     'cachetools',
-    
-    # Langchain
-    'langchain',
-    'langchain_community',
-    'langchain_core',
-    'langchain_openai',
     
     # 项目主模块
     'main_server',
@@ -261,10 +262,6 @@ hiddenimports += [
     'plugin.core.context',
     'plugin.core.state',
     'plugin.runtime',
-    'plugin.runtime.communication',
-    'plugin.runtime.host',
-    'plugin.runtime.registry',
-    'plugin.runtime.status',
     'plugin.sdk',
     'plugin.sdk.base',
     'plugin.sdk.decorators',
@@ -299,7 +296,7 @@ exe = EXE(
     a.scripts,
     [],  # 不打包 binaries 到 exe
     exclude_binaries=True,  # 关键：排除二进制文件，使用 onedir 模式
-    name='server',
+    name='projectneko_server',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

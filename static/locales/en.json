@@ -430,7 +430,10 @@
         "tempFolderRetained": "Temporary folder retained",
         "noAvailableModelsError": "No available models",
         "tagsPlaceholderInput": "Enter tags, press space to add",
-        "prepareUploadFailedMessage": "Prepare upload failed: {{error}}"
+        "prepareUploadFailedMessage": "Prepare upload failed: {{error}}",
+        "noCharacterCardSelected": "Please select a character card first",
+        "steamNotRunningTitle": "Steam Not Running",
+        "steamNotRunningMessage": "Steam client is not running or not logged in.\n\nWorkshop features require the Steam client. Please:\n1. Download and install the Steam client\n2. Launch Steam and log in to your account\n3. Reopen this page"
     },
     "dialogs": {
         "confirmLeave": "Confirm Leave",
@@ -438,11 +441,72 @@
         "clearScreenshots": "Clear Screenshots",
         "clearScreenshotsConfirm": "Are you sure you want to clear all pending screenshots?"
     },
-    "error": {
+    "errors": {
         "emotionTimeout": "Emotion analysis timeout",
         "noAudioTrack": "No available audio track",
         "cameraStreamFailed": "Failed to get camera stream",
-        "characterConfigFailed": "Failed to get character configuration"
+        "characterConfigFailed": "Failed to get character configuration",
+        "API_ARREARS": "💥 API account in arrears. Please top up your balance.",
+        "API_QUOTA_TIME": "💥 Free API quota exhausted. Please try again tomorrow or switch to another API.",
+        "API_RATE_LIMIT": "💥 Too many requests (429) or quota limit reached. Please try again later.",
+        "API_POLICY_VIOLATION": "💥 Policy violation or security block: {{msg}}",
+        "API_1008_FALLBACK": "💥 Connection disconnected (1008): {{msg}}",
+        "API_UNKNOWN_ERROR": "💥 API error: {{msg}}",
+        "MEMORY_SERVER_NOT_RUNNING": "🧠 Memory server not started! Please run memory_server.py first.",
+        "MEMORY_SERVER_CRASHED": "🧠 Memory server (port {{port}}) has crashed. Please restart memory_server.py.",
+        "MEMORY_SERVER_COOLDOWN": "🧠 Memory service is recovering, please wait {{wait_time}}s",
+        "CONNECTION_REFUSED": "💥 Server connection refused. Please check your API Key and network connection.",
+        "API_KEY_REJECTED": "💥 API Key rejected by server. Please check if your API Key matches the selected model.",
+        "API_RATE_LIMIT_SESSION": "💥 API request rate too high, please try again later.",
+        "LLM_CONNECTION_FAILED": "💥 LLM API connection failed. Please check your network connection and API configuration.",
+        "CONNECTION_CLOSED_ABNORMAL": "💥 Connection closed abnormally: {{error}}",
+        "AGENT_QUOTA_EXCEEDED": "💥 Free NekoClaw model daily trial limit reached ({{used}}/{{limit}}). Please try again tomorrow.",
+        "SESSION_START_CRITICAL": "⛔ Session failed to start {{count}} times in a row. Auto-retry stopped. Please check your network and API configuration, then refresh the page.",
+        "SESSION_START_FAILED": "💥 Session start failed: {{error}} (failed {{count}} times)",
+        "INTERNAL_UPDATE_FAILED": "💥 Internal update switch failed: {{error}}",
+        "CHARACTER_DISCONNECTED": "{{name}} disconnected, restarting soon!",
+        "CHARACTER_LEFT": "{{name}} has left.",
+        "ERROR_1011_MIC_CHECK": "💥 Note: Error 1011 detected. This indicates an API server anomaly. Please first check if your microphone is working.",
+        "ERROR_1007_ARREARS": "💥 Note: Error 1007 detected. This is most likely caused by insufficient balance.",
+        "IMAGE_BLOCKED": "⚠️ Image content blocked by review system. Please try a different image or content.",
+        "SERVER_BUSY_THROTTLE": "⚠️ Server busy, automatically adjusting send rate...",
+        "RESPONSE_TIMEOUT": "💥 Connection timeout (Response timeout), voice conversation interrupted.",
+        "CONNECTION_TIMEOUT": "💥 Connection timeout. Please check your network connection.",
+        "RESPONSE_TOO_LONG": "Response too long, output discarded (you can increase TEXT_GUARD_MAX_LENGTH in settings)",
+        "RESPONSE_INVALID": "AI response did not meet requirements, output discarded",
+        "NO_USER_MESSAGE": "⚠️ No user message in conversation history, cannot generate response",
+        "LLM_RETRY": "⚠️ LLM {{error_type}}, retrying ({{attempt}}/{{max_retries}})...",
+        "LLM_CONNECTION_EXHAUSTED": "💥 LLM connection failed ({{error_type}}), exhausted {{max_retries}} retries: {{error}}",
+        "TEXT_GEN_ERROR": "💥 Text generation error: {{error_type}}: {{error}}",
+        "LLM_NO_RESPONSE": "💥 LLM returned no response. Please check your API connection and configuration.",
+        "PROACTIVE_GEN_FAILED": "💥 Proactive response generation failed: {{error_type}}: {{error}}",
+        "CHARACTER_SWITCHING_TERMINAL": "{{name}} is heading to another terminal...",
+        "RELOAD_PAGE": "Voice updated, page will refresh shortly",
+        "AGENT_AUTO_DISABLED_COMPUTER": "Keyboard/mouse control auto-disabled: $t(agent.precheck.{{reason_code}})",
+        "AGENT_AUTO_DISABLED_BROWSER": "Browser control auto-disabled: $t(agent.precheck.{{reason_code}})",
+        "AGENT_LLM_CHECK_ERROR": "NekoClaw LLM connectivity check error",
+        "INVALID_INPUT_TYPE": "Invalid input type: {{input_type}}",
+        "UNKNOWN_ACTION": "Unknown action: {{action}}",
+        "SERVER_ERROR": "Internal server error",
+        "AGENT_CU_MODULE_NOT_LOADED": "Cannot enable Computer Use: module not loaded",
+        "AGENT_CU_ENABLED_CHECKING": "Keyboard/mouse control enabled, checking NekoClaw LLM connectivity...",
+        "AGENT_CU_UNAVAILABLE": "Cannot enable Computer Use: $t(agent.precheck.{{reason_code}})",
+        "AGENT_CU_ENABLE_FAILED": "Failed to enable Computer Use: {{error}}",
+        "AGENT_BU_MODULE_NOT_LOADED": "Cannot enable Browser Use: module not loaded",
+        "AGENT_BU_NOT_INSTALLED": "Cannot enable Browser Use: {{error}}",
+        "AGENT_UP_ENABLED_CHECKING": "User Plugin enabled, starting plugin service...",
+        "AGENT_BU_ENABLED_CHECKING": "Browser control enabled, checking NekoClaw LLM connectivity...",
+        "AGENT_CU_AUTO_CLOSED": "Computer Use module not loaded, auto-disabled",
+        "AGENT_CU_CAPABILITY_LOST": "Computer Use unavailable: $t(agent.precheck.{{reason_code}})",
+        "TTS_CONNECTION_FAILED": "TTS service connection failed: {{msg}}",
+        "TTS_RECONNECTING": "🔄 TTS service is reconnecting, please wait...",
+        "TTS_CUSTOM_URL_NOT_CONFIGURED": "GPT-SoVITS API URL not configured. Please enable and configure custom TTS in API settings.",
+        "TTS_CUSTOM_URL_LOCALHOST_ONLY": "GPT-SoVITS API URL must be localhost",
+        "TTS_AUDIO_API_KEY_MISSING": "Audio API key (AUDIO_API_KEY) not configured",
+        "TTS_VOICE_NOT_REGISTERED": "This character has no registered voice",
+        "TTS_VOICE_REGISTER_MISSING_PARAMS": "Missing required parameters",
+        "TTS_GPT_SOVITS_URL_REQUIRED": "GPT-SoVITS API URL is required",
+        "TTS_GPT_SOVITS_URL_INVALID": "Invalid GPT-SoVITS API URL"
     },
     "camera": {
         "iosPermissionHint": "Please check iOS Settings → Safari → Camera permission is set to \"Allow\"",
@@ -461,7 +525,9 @@
         "clearAll": "Clear All",
         "screenshotAlt": "Screenshot {{index}}",
         "screenshotTitle": "Click to view screenshot {{index}}",
-        "removeScreenshot": "Remove this screenshot"
+        "removeScreenshot": "Remove this screenshot",
+        "avatarPreview": "Show current avatar",
+        "avatarPreviewLabel": "Current avatar"
     },
     "voiceControl": {
         "startVoice": "Start Voice",
@@ -532,8 +598,7 @@
         "step2Link": "API Key Management page",
         "step3": "Create a new API Key and click the copy button",
         "step4": "Paste the API Key into the input box below",
-        "tip": "Please ensure the API Key format is correct. Service restart is required after saving.",
-        "tip2": "In personal use environment, API Key will be fully displayed for copying.",
+        "tip": "Please ensure the API Key format is correct. Remember to click \"Save Settings\" at the bottom.",
         "coreApiKey": "Core API Key",
         "freeVersionHint": "(Not required for Free Version)",
         "coreApiPlaceholder": "Please enter your API Key",
@@ -608,7 +673,40 @@
             "step": "StepFun",
             "silicon": "SiliconFlow (Good Value, Recommended)",
             "gemini": "Gemini (Google, High Intelligence, not available in China)",
-            "kimi": "Kimi (Moonshot, Available in China, Long Context)"
+            "kimi": "Kimi (Moonshot, Available in China, Long Context)",
+            "deepseek": "DeepSeek",
+            "doubao": "ByteDance (Doubao)",
+            "minimax": "MiniMax (Domestic)",
+            "minimax_intl": "MiniMax (Intl)",
+            "grok": "Grok (xAI)"
+        },
+        "coreApiAutoFillHint": "Key auto-filled from API Key Book, or enter directly",
+        "assistApiSelectLabel": "Assist API Provider",
+        "assistApiKeyLabel": "Assist API Key",
+        "assistApiAutoFillHint": "Key auto-filled from API Key Book, or enter directly",
+        "keyBookTitle": "API Key Book",
+        "keyBookDescription": "Manage all API Keys in one place. Keys are auto-filled when switching providers in Core/Assist API, and keys entered there are auto-saved back here.",
+        "keyBookPlaceholder": "Loading API provider config...",
+        "keyBookKeyPlaceholder": "Enter API Key",
+        "keyAutoFilledFromKeyBook": "Key auto-filled from API Key Book. Configure it there.",
+        "goToKeyBook": "Go to Key Book",
+        "providerLabel": "Provider",
+        "customModelProviderFollowCore": "Follow Core API",
+        "customModelProviderFollowAssist": "Follow Assist API",
+        "customModelProviderCustom": "Custom",
+        "keyBook": {
+            "qwen": "Alibaba (Qwen)",
+            "openai": "OpenAI",
+            "deepseek": "DeepSeek",
+            "glm": "Zhipu (GLM)",
+            "step": "StepFun (Step)",
+            "silicon": "SiliconFlow",
+            "gemini": "Gemini (Google)",
+            "kimi": "Moonshot (Kimi)",
+            "doubao": "ByteDance (Doubao)",
+            "minimax": "MiniMax (Domestic)",
+            "minimax_intl": "MiniMax (Intl)",
+            "grok": "Grok (xAI)"
         },
         "freeVersionNoApiKey": "Free version does not require API Key",
         "pleaseEnterApiKey": "Please enter your API Key",
@@ -633,7 +731,7 @@
         "coreApiKeyPlaceholder": "Enter your API Key",
         "baseUrlExamplePlaceholder": "e.g., https://api.openai.com/v1",
         "modelExamplePlaceholder": "e.g., gpt-3.5-turbo, qwen-turbo, glm-4-flash",
-        "conversationApiKeyPlaceholder": "Enter conversation API Key",
+        "conversationApiKeyPlaceholder": "Optional, can be empty for local providers",
         "summaryApiKeyPlaceholder": "Enter Summary API Key",
         "correctionApiKeyPlaceholder": "Enter Correction API Key",
         "emotionApiKeyPlaceholder": "Enter Emotion API Key",
@@ -672,13 +770,13 @@
         "providerPlaceholder": "e.g., openai, azure, local",
         "apiUrlPlaceholder": "e.g., https://api.openai.com/v1",
         "modelIdPlaceholder": "e.g., gpt-5.1-chat-latest, qwen-flash",
-        "apiKeyPlaceholder": "Leave blank to follow Assist API Key (not available for 'free')",
-        "summaryModelApiKeyPlaceholder": "Please enter Summary Model API Key",
-        "correctionModelApiKeyPlaceholder": "Please enter Correction Model API Key",
-        "emotionModelApiKeyPlaceholder": "Please enter Emotion Model API Key",
-        "visionModelApiKeyPlaceholder": "Please enter Vision Model API Key",
-        "omniModelApiKeyPlaceholder": "Please enter Omni Model API Key",
-        "ttsModelApiKeyPlaceholder": "Please enter TTS Model API Key",
+        "apiKeyPlaceholder": "Optional, can be empty for local providers",
+        "summaryModelApiKeyPlaceholder": "Optional, can be empty for local providers",
+        "correctionModelApiKeyPlaceholder": "Optional, can be empty for local providers",
+        "emotionModelApiKeyPlaceholder": "Optional, can be empty for local providers",
+        "visionModelApiKeyPlaceholder": "Optional, can be empty for local providers",
+        "omniModelApiKeyPlaceholder": "Optional, can be empty for local providers",
+        "ttsModelApiKeyPlaceholder": "Optional, can be empty for local providers",
         "ttsVoiceId": "Voice ID",
         "ttsVoiceIdHint": "(Optional, fallback voice when character has none)",
         "ttsVoiceIdPlaceholder": "e.g., Chinese Female, alloy",
@@ -730,19 +828,20 @@
         "gptsovitsDescriptionText": "A locally deployed voice cloning model. Start the GPT-SoVITS v3 API service first. Voice configs (reference audio, model weights, etc.) are managed in v3's voices/*.toml files — just enter the voice config ID here.",
         "gptsovitsApiUrlPlaceholder": "e.g., http://127.0.0.1:9881",
         "gptsovitsApiUrlOptional": "(Optional, default http://127.0.0.1:9881)",
-        "gptsovitsVoiceId": "Voice Config",
-        "gptsovitsVoiceIdHint": "(Fetch available configs from GPT-SoVITS v3)",
-        "gptsovitsVoiceIdEmpty": "-- Fetch voice list first --",
+        "gptsovitsVoiceId": "Default Voice Config",
+        "gptsovitsVoiceIdHint": "(Voice ID set in Character Manager will override this default)",
+        "gptsovitsVoiceIdEmpty": "-- Refresh to fetch voice list --",
         "gptsovitsNoVoices": "-- No configs available --",
-        "gptsovitsRefreshVoices": "Fetch List",
+        "gptsovitsRefreshVoices": "Refresh List",
         "gptsovitsVoicesLoaded": "Loaded {{count}} voice config(s)",
         "gptsovitsVoicesLoadFailed": "Failed to fetch voice list",
         "gptsovitsEnabled": "Enable GPT-SoVITS",
         "gptsovitsEnabledHint": "(Will override TTS config above when enabled)",
+        "gptsovitsApiUrlRequired": "Please enter a valid http/https API URL",
         "wsWarning": {
             "title": "Protocol Error",
             "message": "URL must use WebSocket protocol (starting with ws:// or wss://)",
-            "messageWithType": "<strong>{{apiType}}</strong> URL must use WebSocket protocol (starting with ws:// or wss://)",
+            "messageWithType": "{{apiType}} URL must use WebSocket protocol (starting with ws:// or wss://)",
             "correctExamples": "Correct examples:",
             "wrongExamples": "Wrong examples:",
             "confirm": "I understand"
@@ -762,6 +861,20 @@
         "selectExpression": "Expression",
         "selectPersistentExpression": "Persist. Expr.",
         "noMotionFiles": "No motion files",
+        "touchAnim": {
+            "title": "Touch Anim Config",
+            "selectMotion": "Bind Motion",
+            "selectExpression": "Bind Expression",
+            "hitAreaId": "Touch Area",
+            "close": "Close",
+            "configSaved": "Touch reaction config saved",
+            "noHitAreas": "Model has no hit areas defined",
+            "modelNotFound": "No model loaded",
+            "modelDataNotReady": "Model internal data not ready",
+            "managerNotFound": "Live2DManager not found",
+            "select": "Select",
+            "defaultClickAnim": "Default Click Animation"
+        },
         "emotionConfig": "Emotion Config",
         "saveSettings": "Save Settings",
         "persistentExpression": "Persistent Expression (expression only):",
@@ -858,6 +971,42 @@
             "loop": "Loop",
             "speed": "Speed:"
         },
+        "mmdModel": {
+            "selectModel": "Select MMD Model",
+            "deleteModel": "Delete Imported MMD Models",
+            "deleteModelTitle": "Delete Imported MMD Models",
+            "deleteWarning": "Below are all imported user MMD models. Select models to delete (model folder and textures will be deleted together).",
+            "noUserModels": "No user MMD models to delete",
+            "deleteSelected": "Delete Selected"
+        },
+        "mmdAnimation": {
+            "selectAnimation": "Select VMD Animation",
+            "noAnimation": "No Animation",
+            "play": "Play",
+            "uploadAnimation": "Import VMD Animation",
+            "deleteAnimation": "Delete VMD Animation",
+            "deleteAnimationTitle": "Delete Imported VMD Animations",
+            "deleteAnimationWarning": "Below are all imported user VMD animation files. Select animations to delete.",
+            "noUserAnimations": "No user VMD animations to delete",
+            "deleteSelected": "Delete Selected",
+            "deleteConfirmTitle": "Delete VMD Animation",
+            "deleteConfirmMessage": "Are you sure you want to delete {{count}} selected VMD animation(s)? This action cannot be undone.",
+            "deleting": "Deleting...",
+            "loading": "Loading VMD animation...",
+            "loadSuccess": "VMD animation loaded successfully",
+            "loadFailed": "Failed to load VMD animation: {{error}}",
+            "selectFirst": "Please select a VMD animation first",
+            "stopped": "VMD animation stopped",
+            "playing": "VMD animation playing",
+            "selectVmdFile": "Please select a .vmd file",
+            "uploading": "Uploading VMD animation...",
+            "uploadSuccess": "VMD animation {{name}} uploaded successfully",
+            "uploadFailed": "Upload failed: {{error}}",
+            "deleteSuccess": "Successfully deleted {{count}} VMD animation(s)",
+            "deleteFailed": "Failed to delete: {{count}} animation(s)",
+            "deleteSelectedCount": "Delete Selected ({{count}})",
+            "deletePartialSuccess": "Successfully deleted {{count}} VMD animation(s), {{failed}} failed"
+        },
         "modelFilesFetchFailed": "Failed to fetch model files list",
         "modelConfigFetchFailed": "Failed to fetch model config: {{status}}",
         "updatedPersistentExpression": "Updated persistent expression",
@@ -917,7 +1066,9 @@
             "savingParameters": "Saving...",
             "parametersSaved": "Saved!",
             "parametersSavePartialFailed": "Save failed: {{errors}}",
-            "parametersSaveFailed": "Save failed: {{error}}"
+            "parametersSaveFailed": "Save failed: {{error}}",
+            "emptyHint": "Nothing in here!",
+            "foundYou": "You found me!"
         },
         "modelDirectorySaveFailed": "File save failed",
         "userPreferencesSaveFailed": "Prefs save failed",
@@ -956,11 +1107,20 @@
             "saved": "Emotion mapping saved",
             "saveFailed": "Failed to save emotion mapping",
             "noModelSelected": "Please select a model first"
-        }
+        },
+        "noExpressionFiles": "No expression files"
     },
     "voice": {
         "title": "Voice Registration",
-        "alibabaApiRequired": "⚠️ This feature requires CosyVoice model. Please configure Alibaba Assist API or local voice server in API Keys settings.",
+        "alibabaApiRequired": "⚠️ This feature requires the CosyVoice model. Please save the Alibaba Bailian API Key in API Keys settings (enabling Assist API is not required), or configure a local voice server.",
+        "minimaxApiRequired": "⚠️ This feature requires the MiniMax model (Domestic). Please save the MiniMax API Key in API Keys settings (enabling Assist API is not required).",
+        "minimaxIntlApiRequired": "⚠️ This feature requires the MiniMax model (International). Please save the MiniMax International API Key in API Keys settings (enabling Assist API is not required).",
+        "providerLabel": "Voice Clone Provider",
+        "provider": {
+            "cosyvoice": "Alibaba Cloud CosyVoice",
+            "minimax": "MiniMax (Domestic)",
+            "minimax_intl": "MiniMax (Intl)"
+        },
         "selectFile": "Select local audio file (8 seconds recommended, max 20 seconds, wav/mp3 format)",
         "customPrefix": "Custom Prefix (Required, used to distinguish different voices)",
         "customPrefixNote": "Maximum 10 characters, numbers and English letters only",
@@ -972,7 +1132,10 @@
         "prefixFormatError": "Prefix format error: Maximum 10 characters, numbers and English letters only",
         "registering": "Registering voice, please wait!",
         "registerSuccess": "Registration successful! voice_id: {{voiceId}}",
+        "reusedExisting": "Reused existing voice, upload skipped. voice_id: {{voiceId}}",
         "registerFailed": "Registration failed: {{error}}",
+        "prefixShouldBeEnglishLetterAndNumber": "Prefix should be English letters and numbers",
+        "invalidApiKeyProvided": "Invalid API-key provided",
         "requestError": "Request error: {{error}}",
         "voiceIdSaveFailed": "Failed to automatically save voice_id: {{error}}",
         "voiceIdSaved": "voice_id has been automatically saved to character",
@@ -1007,7 +1170,28 @@
         "deleteFailed": "Delete failed",
         "deleteError": "Delete failed: {{error}}",
         "freePresetLabel": "Free Preset Voices",
-        "freePresetBadge": "Preset"
+        "freePresetBadge": "Preset",
+        "silenceModal": {
+            "title": "Smart Silence Detection Results",
+            "originalDuration": "Original Audio Duration",
+            "silenceDuration": "Removable Silence Duration",
+            "estimatedDuration": "Estimated Duration After Trim",
+            "savingPercentage": "Saving Ratio",
+            "processing": "Processing...",
+            "analyzing": "Analyzing...",
+            "trimming": "Trimming...",
+            "done": "Done",
+            "cancelled": "Cancelled",
+            "trimSuccess": "✅ Trimming Complete!",
+            "downloadTrimmed": "Download Trimmed Audio",
+            "useTrimmed": "Use Smart Trimmed Audio",
+            "useOriginal": "Upload Original Audio",
+            "cancel": "Cancel",
+            "noSilence": "No removable silence segments detected",
+            "trimError": "Trimming failed: {{error}}",
+            "trimmedLabel": "[Trimmed]",
+            "confirmTrimmed": "Use Smart Trimmed Audio"
+        }
     },
     "memory": {
         "title": "Memory Browser",
@@ -1032,7 +1216,7 @@
         "saveSuccess": "Save successful",
         "saveFailed": "Save failed: {{error}}",
         "saveFailedGeneral": "Save failed",
-        "clearedMemory": "Recent memory cleared, not saved",
+        "clearedChatKeptMemo": "Chat messages cleared; memo kept (not saved)",
         "enabled": "Enabled",
         "disabled": "Disabled",
         "autoReviewNote": "When enabled, the system will automatically organize and optimize memory content to improve conversation quality",
@@ -1066,6 +1250,8 @@
         "profileName": "Profile Name",
         "profileNameMaxHint": "Max 20 characters",
         "profileNameTooLong": "Profile name is too long",
+        "profileNameContainsSlash": "Profile name cannot contain path separators (/ or \\)",
+        "profileNameContainsDot": "Profile name cannot contain dots (.)",
         "newProfileNameRequired": "New profile name cannot be empty",
         "newProfileNameTooLong": "Profile name is too long",
         "required": "*",
@@ -1075,6 +1261,9 @@
         "addCatgirl": "Add NEKO",
         "switchCatgirl": "Switch NEKO",
         "deleteCatgirl": "Delete NEKO",
+        "hideCatgirl": "Hide this NEKO",
+        "hiddenCatgirls": "Hidden NEKOs",
+        "show": "Unhide",
         "advancedSettings": "Advanced Settings",
         "modelSettings": "Model Settings",
         "modelNotSet": "Not Set",
@@ -1082,6 +1271,7 @@
         "lightingNotSet": "Default",
         "live2dNotSet": "Not Set",
         "voiceNotSet": "No Voice Specified",
+        "voiceSetting": "Voice Settings",
         "manageModel": "Click to manage model",
         "fillProfileNameFirst": "Please fill in the neko profile name first, then set the model",
         "registerNewVoice": "Register New Voice",
@@ -1134,7 +1324,38 @@
         "unregisterError": "An error occurred while unregistering",
         "switchFailed": "Switch failed",
         "switchError": "An error occurred while switching neko",
-        "freePresetVoices": "Free Preset Voices"
+        "freePresetVoices": "Free Preset Voices",
+        "gptsovitsVoices": "GPT-SoVITS Voices",
+        "loadFailed": "Failed to load character data",
+        "renameError": "Rename failed: {{error}}",
+        "renameMasterTitle": "Rename Master",
+        "renameSuccess": "Rename successful",
+        "autoSaveError": "Failed to save settings",
+        "saveMasterError": "Failed to save master settings",
+        "autoSaved": "Settings auto-saved",
+        "autoSaveFailed": "Auto-save failed, please save manually before closing",
+        "exportCard": "Export Character Card",
+        "exportingCard": "Exporting character card...",
+        "exportCardSuccess": "Character card exported successfully",
+        "exportCardFailed": "Failed to export character card: {{error}}",
+        "exportUsingDefaultModel": "Using default model, cannot export model files",
+        "exportNoModelFound": "Model files not found",
+        "exportModelNotUserImported": "Only user-imported models can be exported",
+        "importCard": "Import Character Card",
+        "importingCard": "Importing character card...",
+        "importCardSuccess": "Character card \"{{name}}\" imported successfully",
+        "importCardFailed": "Failed to import character card: {{error}}",
+        "importInvalidFile": "Please select a valid PNG image file or .nekocfg settings file",
+        "importNoMarker": "This image is not a valid character card file",
+        "exportOptions": "Select Export Method",
+        "exportOptionsDesc": "Please select what to export:",
+        "exportFull": "Export Character Card",
+        "exportSettingsOnly": "Export Settings Only",
+        "exportingSettings": "Exporting settings...",
+        "exportSettingsSuccess": "Settings exported successfully",
+        "exportSettingsFailed": "Failed to export settings: {{error}}",
+        "capturingPortrait": "Capturing portrait...",
+        "generatingCard": "Generating character card..."
     },
     "app": {
         "welcomeBack": "{{name}} is back!",
@@ -1147,6 +1368,8 @@
         "autoMuteTimeout": "No voice input for a long time, microphone auto-closed",
         "deviceSelected": "Selected {{device}}",
         "micAccessDenied": "Cannot access microphone",
+        "micMuted": "Microphone muted",
+        "micUnmuted": "Microphone unmuted",
         "speaking": "Speaking...",
         "standby": "{{name}} on standby...",
         "micRequired": "Please enable microphone first!",
@@ -1204,15 +1427,22 @@
             "windows": "Windows",
             "selected": "Selected {{source}}",
             "sourceLost": "Screen sharing could not find previously selected window, switched to fullscreen sharing"
-        }
+        },
+        "deviceSwitchFailed": "Device switch failed",
+        "deviceSwitching": "Switching device...",
+        "modelPathEmpty": "Model path is empty",
+        "modelSwitchFailed": "Model switch failed",
+        "sessionFailed": "Session failed to start"
     },
     "buttons": {
         "voiceControl": "Voice Control",
         "screenShare": "Screen Share",
-        "agentTools": "Agent Tools",
+        "agentTools": "NekoClaw",
         "settings": "Settings",
         "leave": "Leave",
-        "return": "Return"
+        "return": "Return",
+        "micMute": "Mute Microphone",
+        "micUnmute": "Unmute"
     },
     "settings": {
         "menu": {
@@ -1237,7 +1467,8 @@
             "en": "English",
             "ja": "日本語",
             "zh-TW": "繁體中文",
-            "ko": "한국어"
+            "ko": "한국어",
+            "ru": "Русский"
         },
         "interval": {
             "chatIntervalBase": "Base Interval",
@@ -1254,21 +1485,31 @@
             "proactiveNewsChatTooltip": "Use trending topics for proactive chat",
             "proactiveVideoChat": "Video Website",
             "proactiveVideoChatTooltip": "Use video content for proactive chat",
-            "agentMaster": "Agent Master Switch",
+            "proactivePersonalChat": "Personal Updates",
+            "proactivePersonalChatTooltip": "Use personal updates from connected platforms for proactive chat",
+            "proactiveMusicChat": "Music Recommendation",
+            "proactiveMusicChatTooltip": "Use recommended music for proactive chat",
+            "proactiveMemeChat": "Meme Sharing",
+            "proactiveMemeChatTooltip": "Share funny memes for proactive chat",
+            "agentMaster": "NekoClaw Master Switch",
             "keyboardControl": "Keyboard/Mouse Control",
             "userPlugin": "User Plugin",
+            "pluginConfigPage": "Config",
+            "pluginManagementPanel": "Management Panel",
             "mcpTools": "MCP Tools",
             "browserUse": "Browser Control",
             "focusMode": "Allow Interrupt",
             "unavailable": "{{name}} Unavailable",
             "checking": "Checking...",
-            "serverOffline": "Agent Server Offline",
-            "masterRequired": "Please enable Agent Master Switch first",
+            "serverOffline": "NekoClaw Server Offline",
+            "masterRequired": "Please enable NekoClaw Master Switch first",
+            "capabilityNotReady": "{{name}} not ready, click to try enabling",
             "enabled": "{{name}} Enabled",
             "disabled": "{{name}} Disabled",
             "enableFailed": "{{name}} Enable Failed",
+            "openfang": "Virtual Machine",
             "userPluginAdapting": "User Plugin (Developing)",
-            "moltbotAdapting": "moltbot (Developing)",
+            "openclawConnect": "OpenClaw",
             "chatSettings": "Chat Settings",
             "animationSettings": "Animation Settings",
             "renderQuality": "Quality",
@@ -1278,7 +1519,11 @@
             "frameRate": "Frame Rate",
             "frameRateLow": "30fps",
             "frameRateMedium": "45fps",
-            "frameRateHigh": "60fps"
+            "frameRateHigh": "60fps",
+            "frameRateUnlimited": "Unlimited(VSync)",
+            "mouseTracking": "Mouse Tracking",
+            "fullscreenTracking": "Fullscreen Tracking",
+            "localTracking": "Local Tracking"
         }
     },
     "subtitle": {
@@ -1290,27 +1535,52 @@
     },
     "agent": {
         "status": {
-            "connecting": "Connecting to Agent server...",
-            "ready": "Agent server ready",
-            "enabled": "Agent mode enabled",
-            "disabled": "Agent mode disabled",
-            "disabledError": "Agent mode disabled (partial cleanup failed)",
+            "connecting": "Connecting to NekoClaw server...",
+            "ready": "NekoClaw server ready",
+            "enabled": "NekoClaw mode enabled",
+            "disabled": "NekoClaw mode disabled",
+            "disabledError": "NekoClaw mode disabled (partial cleanup failed)",
             "enableFailed": "Enable failed",
             "disconnected": "Server connection lost",
-            "agentDisconnected": "Agent server connection lost",
-            "freeModelWarning": "Due to quota limitations, free models are prone to blocking in Agent mode. It is recommended to switch to a paid model.\n\nIf you have already configured a paid API, please try restarting NEKO.",
-            "freeModelWarningTitle": "Free Model Notice"
+            "agentDisconnected": "NekoClaw server connection lost",
+            "freeModelWarning": "Due to quota limitations, free models are prone to blocking in NekoClaw mode. It is recommended to switch to a paid model.\n\nIf you have already configured a paid API, please try restarting NEKO.",
+            "freeModelWarningTitle": "Free Model Notice",
+            "connectivityCheck": "NekoClaw LLM connectivity check in progress...",
+            "precheckFailed": "NekoClaw precheck failed: {{reason}}"
         },
-        "quotaExceeded": "The free Agent model daily trial limit has been reached ({{limit}} uses). Please try again tomorrow.",
+        "precheck": {
+            "AGENT_PRECHECK_PENDING": "Connectivity check in progress...",
+            "AGENT_ENDPOINT_NOT_CONFIGURED": "Agent API not configured",
+            "AGENT_PYAUTOGUI_NOT_INSTALLED": "pyautogui not installed",
+            "AGENT_BROWSER_USE_NOT_INSTALLED": "browser-use not installed",
+            "AGENT_NOT_INITIALIZED": "NekoClaw initialization failed",
+            "AGENT_LLM_UNREACHABLE": "NekoClaw LLM unreachable",
+            "AGENT_MODEL_NOT_CONFIGURED": "NekoClaw model not configured",
+            "AGENT_URL_NOT_CONFIGURED": "Agent API URL not configured",
+            "AGENT_KEY_NOT_CONFIGURED": "Agent API Key not configured or unavailable",
+            "AGENT_NO_PLUGINS": "No available plugins found",
+            "AGENT_NO_PLUGINS_FOUND": "No available plugins found",
+            "AGENT_PLUGIN_SERVER_ERROR": "Plugin server connection failed",
+            "AGENT_CONNECTIVITY_FAILED": "NekoClaw LLM connection failed"
+        },
+        "quotaExceeded": "The free NekoClaw model daily trial limit has been reached ({{limit}} uses). Please try again tomorrow.",
+        "contentFilterError": "The web page content browsed by NekoClaw was rejected by the AI model's safety filter and the task has been aborted. This usually happens when the page contains sensitive topics. Please try different keywords or websites.",
         "taskHud": {
-            "title": "Agent Tasks",
+            "title": "NekoClaw Tasks",
             "running": "Running",
             "queued": "Queued",
             "noTasks": "No active tasks",
             "statusRunning": "Running",
             "statusQueued": "Queued",
             "statusCompleted": "Completed",
-            "statusFailed": "Failed"
+            "statusFailed": "Failed",
+            "minimize": "Collapse/Expand",
+            "cancelAll": "Cancel all tasks",
+            "cancelConfirm": "Cancel all running tasks?",
+            "typeUserPlugin": "User Plugin",
+            "typeComputerUse": "Computer Use",
+            "typeBrowserUse": "Browser Control",
+            "typeMCP": "MCP Tool"
         }
     },
     "vrm": {
@@ -1328,7 +1598,10 @@
             "animationClipError": "Error creating animation clip: {{error}}",
             "animationClipNoBones": "Animation clip creation failed: No matching bones found",
             "cannotCreateAnimationAction": "Cannot create animation action",
-            "invalidModelPath": "Invalid VRM model path: {{path}}"
+            "invalidModelPath": "Invalid VRM model path: {{path}}",
+            "gltfLoaderImportFailed": "Failed to import GLTFLoader: {{error}}",
+            "threeIncomplete": "Three.js dependency incomplete, missing: {{missing}}",
+            "vrmLoaderImportFailed": "Failed to import VRMLoaderPlugin: {{error}}"
         },
         "lighting": {
             "title": "VRM Lighting Settings",
@@ -1354,6 +1627,52 @@
         "idleAnimation": {
             "title": "Idle Animation",
             "changed": "Idle animation changed: {{name}}",
+            "changeFailed": "Failed to change idle animation"
+        },
+        "settingsTitle": "VRM Model Settings",
+        "cursorFollow": {
+            "title": "Cursor Follow",
+            "preset": "Follow Intensity",
+            "none": "Off",
+            "low": "Low",
+            "medium": "Medium",
+            "high": "High",
+            "eyeSensitivity": "Eye Sensitivity",
+            "headSensitivity": "Head Sensitivity",
+            "headSpeed": "Head Tracking Speed"
+        }
+    },
+    "mmd": {
+        "settingsTitle": "MMD Model Settings",
+        "lighting": {
+            "title": "MMD Lighting",
+            "ambientIntensity": "Ambient Intensity",
+            "ambientColor": "Ambient Color",
+            "directionalIntensity": "Directional Intensity",
+            "directionalColor": "Directional Color"
+        },
+        "rendering": {
+            "title": "MMD Rendering",
+            "toneMapping": "Tone Mapping",
+            "exposure": "Exposure",
+            "outline": "Outline Effect",
+            "pixelRatio": "Pixel Ratio"
+        },
+        "physics": {
+            "title": "MMD Physics",
+            "enabled": "Physics Simulation",
+            "strength": "Simulation Strength"
+        },
+        "cursorFollow": {
+            "title": "Cursor Follow",
+            "enabled": "Head Tracking",
+            "headYaw": "Yaw Range",
+            "headPitch": "Pitch Range",
+            "smoothSpeed": "Tracking Smoothness"
+        },
+        "idleAnimation": {
+            "title": "Idle Animation",
+            "changed": "Idle animation changed",
             "changeFailed": "Failed to change idle animation"
         }
     },
@@ -1492,8 +1811,8 @@
             "desc": "Share your screen/window/tab with your Neko~"
         },
         "step8": {
-            "title": "🔨 Agent Tools",
-            "desc": "Open Agent tool panel with various helper functions~"
+            "title": "🔨 NekoClaw",
+            "desc": "Open the NekoClaw panel for computer use, browser use, plugin, and more~"
         },
         "step9": {
             "title": "💤 Ask Her to Leave",
@@ -1773,7 +2092,7 @@
         "voice_clone": {
             "step1": {
                 "title": "⚠️ Important Notice",
-                "desc": "Voice cloning requires Alibaba Cloud API. Make sure you've configured Alibaba Cloud API Key in API settings."
+                "desc": "Voice cloning requires a configured voice provider API Key. Please save the required API Key in API Keys settings."
             },
             "step2": {
                 "title": "🌍 Select Reference Audio Language",
@@ -1824,13 +2143,15 @@
             "next": "Next",
             "prev": "Previous",
             "done": "Done",
-            "close": "Close"
+            "close": "Close",
+            "skip": "Skip"
         },
         "fullscreenPrompt": {
             "title": "🎓 Start Tutorial",
             "desc": "For the best tutorial experience, we recommend entering fullscreen mode.\nIn fullscreen mode, the tutorial content will be clearer and won't be obscured by other elements.",
             "enterFullscreen": "Enter Fullscreen Tutorial"
-        }
+        },
+        "drag_hint": "Hold and drag to move the tooltip"
     },
     "console": {
         "oggOpusInitFailed": "[OGG OPUS] Initialization Promise failed, will allow retry:",
@@ -1944,7 +2265,9 @@
         "translationApiResult": "Translation API returned result:",
         "translationError": "Translation error:",
         "translationException": "Translation request exception:",
-        "resetButtonNotFound": "[App] resetSessionButton not found!"
+        "resetButtonNotFound": "[App] resetSessionButton not found!",
+        "aiFailed": "Connection to catgirl encountered an error",
+        "aiRetrying": "Connection error, recalibrating..."
     },
     "emotionManager": {
         "title": "Live2D Emotion Mapping Manager - Project N.E.K.O.",
@@ -2012,11 +2335,222 @@
             "surprised": "Surprised"
         }
     },
+    "mmdEmotionManager": {
+        "title": "MMD Emotion Mapping Manager - Project N.E.K.O.",
+        "pageTitle": "MMD Emotion Mapping Manager",
+        "subtitle": "Configure MorphTarget mappings for different emotions",
+        "selectModel": "Select MMD Model",
+        "morphPreview": "Morph Preview",
+        "morphCandidates": "Morph Candidates",
+        "selectMorph": "Select Morph",
+        "saveConfig": "Save Configuration",
+        "resetToDefault": "Reset to Default",
+        "loading": "Loading...",
+        "loadingMorphs": "Loading morph list",
+        "pleaseSelectModel": "Please select a model",
+        "noModelsFound": "No available MMD models found",
+        "noMorphsFound": "No available morphs",
+        "loadModelListFailed": "Failed to load model list",
+        "loadMorphsFailed": "Failed to load morph list",
+        "morphsLoadedFromModel": "Morph list loaded from current model",
+        "useDefaultMorphs": "Using default morph list (please load model on main page first for accurate list)",
+        "configLoadSuccess": "Configuration loaded successfully",
+        "configLoadFailed": "Failed to load configuration",
+        "configUseDefault": "Using default configuration",
+        "configSaveSuccess": "Configuration saved successfully!",
+        "saveFailed": "Save failed",
+        "configReset": "Configuration has been reset to default",
+        "pleaseSelectModelFirst": "Please select a model first",
+        "tip": "Tip: ",
+        "tipContent": "MMD model expressions use MorphTargets. Please select multiple candidate morphs for each emotion, the system will automatically match the morphs supported by the model.",
+        "close": "Close",
+        "emotions": {
+            "neutral": "Neutral",
+            "happy": "Happy",
+            "relaxed": "Relaxed",
+            "sad": "Sad",
+            "angry": "Angry",
+            "surprised": "Surprised",
+            "fear": "Fear"
+        }
+    },
     "theme": {
         "darkMode": "Dark Mode",
         "lightMode": "Light Mode",
         "switchToDark": "Switch to Dark Mode",
         "switchToLight": "Switch to Light Mode",
         "themeChanged": "Theme changed"
+    },
+    "characterModelNotSet": "Current character has no model set",
+   "cookiesLogin": {
+        "title": "N.E.K.O Credential Control Center",
+        "header": "🔐 Credential Acquisition Center",
+        "bilibili": "📺 Bilibili",
+        "douyin": "🎵 Douyin",
+        "kuaishou": "🧡 Kuaishou",
+        "weibo": "🌏 Weibo",
+        "twitter": "🐦 Twitter/X",
+        "reddit": "👽 Reddit",
+        "saveConfig": "Save Configuration",
+        "encryptStorage": "Securely encrypt and store to local file",
+        "localMonitoring": "Local Status Monitoring",
+        "removeCredentials": "Remove",
+        "confirmRemove": "Are you sure you want to clear the login credentials for {{platformName}}?",
+        "credentialsRemoved": "✅ Credentials removed successfully",
+        "credentialsSaved": "✅ {{platformName}} credentials saved successfully!",
+        "credentialsRemovedFailed": "Removal failed",
+        "removeFailed": "❌ Removal failed, please check your network",
+        "requiredField": "⚠️ Please fill in the required field: [{{fieldName}}]",
+        "invalidChars": "⚠️ [{{fieldName}}] contains invalid characters...",
+        "whitespaceTrimmed": "⚠️ [{{fieldName}}] contains leading/trailing spaces, which have been automatically trimmed. Please confirm and resubmit.",
+        "networkError": "❌ Network error: Unable to connect to backend service",
+        "saveFailed": "Save failed, please check if the format is correct",
+        "pasteHere": "Paste here",
+        "submitting": "Securely encrypting and transmitting...",
+        "noCookies": "Please configure Cookies first",
+        "statusLoadFailed": "Status load failed",
+        "thisPlatform": "this platform",
+        "instructions": {
+            "bilibili": "📌 <b>Target:</b> Go to <b>bilibili.com</b> to fetch these cookies.",
+            "douyin": "📌 <b>Target:</b> Go to <b>douyin.com</b> to fetch these cookies.",
+            "kuaishou": "📌 <b>Target:</b> Go to <b>kuaishou.com</b> to fetch these cookies.",
+            "weibo": "📌 <b>Target:</b> Go to <b>weibo.com</b> to fetch these cookies.",
+            "twitter": "📌 <b>Target:</b> Go to <b>x.com</b> to fetch these cookies.",
+            "reddit": "📌 <b>Target:</b> Go to <b>reddit.com</b> to fetch these cookies."
+        },
+        "guide": {
+            "title": "Universal Guide for Beginners",
+            "step1": "Open the target platform website in browser and <span class=\"highlight-text\">log in</span>.",
+            "step2_prefix": "Press",
+            "step2_suffix": "to open Developer Tools.",
+            "step3": "Find and click <span class=\"highlight-text\">Application</span> tab at the top.",
+            "step4": "Find <span class=\"highlight-text\">Cookies</span> on the left sidebar, click the domain, and copy the required values on the right."
+        },
+        "fields": {
+            "SESSDATA": {
+                "label": "SESSDATA",
+                "desc": "Core identity credential (Required)"
+            },
+            "bili_jct": {
+                "label": "bili_jct",
+                "desc": "CSRF Token (Required)"
+            },
+            "DedeUserID": {
+                "label": "DedeUserID",
+                "desc": "Account UID (Required)"
+            },
+            "buvid3": {
+                "label": "buvid3",
+                "desc": "Device fingerprint (Optional)"
+            },
+            "sessionid": {
+                "label": "sessionid",
+                "desc": "Core session credential (Required)"
+            },
+            "ttwid": {
+                "label": "ttwid",
+                "desc": "Device risk control code (Required)"
+            },
+            "passport_csrf_token": {
+                "label": "csrf_token",
+                "desc": "Security verification token"
+            },
+            "odin_tt": {
+                "label": "odin_tt",
+                "desc": "Device characteristics"
+            },
+            "ks_web_st": {
+                "label": "web_st",
+                "desc": "Core ticket (Required)"
+            },
+            "ks_web_ph": {
+                "label": "web_ph",
+                "desc": "Auxiliary ticket (Required)"
+            },
+            "userId": {
+                "label": "userId",
+                "desc": "User ID"
+            },
+            "did": {
+                "label": "did",
+                "desc": "Device ID"
+            },
+            "SUB": {
+                "label": "SUB",
+                "desc": "Core credential (Starts with _2A)"
+            },
+            "XSRF-TOKEN": {
+                "label": "XSRF-TOKEN",
+                "desc": "Anti-forgery token"
+            },
+            "auth_token": {
+                "label": "auth_token",
+                "desc": "Core identity Token"
+            },
+            "ct0": {
+                "label": "ct0",
+                "desc": "CSRF verification code"
+            },
+            "reddit_session": {
+                "label": "reddit_session",
+                "desc": "Core session credential (Required)"
+            },
+            "csrftoken": {
+                "label": "csrftoken",
+                "desc": "CSRF token"
+            }
+        },
+        "status": {
+            "active": "● Ready",
+            "inactive": "○ Not configured"
+        },
+        "qrLogin": {
+            "tryQR": "Or... try QR code login?",
+            "openQR": "📱 Open QR Login",
+            "loading": "Getting QR code...",
+            "scanTitle": "📱 Scan to Login {{platform}}",
+            "waiting": "Waiting for scan...",
+            "validFor": "QR code valid for: {{seconds}}s",
+            "refreshQR": "Refresh QR Code",
+            "fetchFailed": "Failed to get QR code, please try again",
+            "retry": "Retry",
+            "networkError": "Network request failed, please check connection",
+            "status": {
+                "success": "✅ {{message}}",
+                "expired": "❌ {{message}}, please refresh",
+                "scanned": "📱 {{message}}",
+                "waiting": "{{message}}..."
+            },
+            "successAlert": "QR login successful! Cookies have been filled in automatically, please click Save Configuration"
+        }
+    },
+    "music": {
+        "unknownTrack": "Unknown Track",
+        "unknownArtist": "Unknown Artist",
+        "play": "Play",
+        "pause": "Pause",
+        "playing": "Playing",
+        "paused": "Paused",
+        "searching": "Searching: {{query}}",
+        "notFound": "Track not found: {{query}}",
+        "nowPlaying": "Now Playing: {{name}}",
+        "showPlaylist": "Show Playlist",
+        "hidePlaylist": "Hide Playlist",
+        "searchFailed": "Music search failed",
+        "playError": "Music playback failed to load",
+        "loadError": "Music player failed to load",
+        "autoplayBlocked": "Browser blocked autoplay, please click the play button",
+        "ended": "Ended"
+    },
+    "notice": {
+        "voiceMigration": {
+            "legacyRemoved": "CosyVoice has been upgraded to 3.5. Your old voices are no longer valid — please re-clone your voices."
+        }
+    },
+    "proactive": {
+        "meme": {
+            "title": "Meme",
+            "loadError": "Failed to load meme"
+        }
     }
 }

@@ -1,20 +1,19 @@
-from langchain_community.chat_message_histories import SQLChatMessageHistory
-from langchain_core.messages import SystemMessage
+from utils.llm_client import SQLChatMessageHistory, SystemMessage
 from sqlalchemy import create_engine, text
 from config import TIME_ORIGINAL_TABLE_NAME, TIME_COMPRESSED_TABLE_NAME
 from utils.config_manager import get_config_manager
+from utils.logger_config import get_module_logger
 from datetime import datetime
-import logging
 import os
 
-logger = logging.getLogger(__name__)
+logger = get_module_logger(__name__, "Memory")
 
 class TimeIndexedMemory:
     def __init__(self, recent_history_manager):
         self.engines = {}  # 存储 {lanlan_name: engine}
         self.db_paths = {} # 存储 {lanlan_name: db_path}
         self.recent_history_manager = recent_history_manager
-        _, _, _, _, _, _, _, time_store, _, _ = get_config_manager().get_character_data()
+        _, _, _, _, _, _, time_store, _, _ = get_config_manager().get_character_data()
         for name in time_store:
             self._ensure_engine_exists(name, time_store[name])
 
@@ -25,13 +24,13 @@ class TimeIndexedMemory:
 
         try:
             if not db_path:
-                _, _, _, _, _, _, _, time_store, _, _ = get_config_manager().get_character_data()
+                _, _, _, _, _, _, time_store, _, _ = get_config_manager().get_character_data()
                 if lanlan_name in time_store:
                     db_path = time_store[lanlan_name]
                 else:
+                    from memory import ensure_character_dir
                     config_mgr = get_config_manager()
-                    config_mgr.ensure_memory_directory()
-                    db_path = os.path.join(str(config_mgr.memory_dir), f'time_indexed_{lanlan_name}')
+                    db_path = os.path.join(ensure_character_dir(config_mgr.memory_dir, lanlan_name), 'time_indexed.db')
                     logger.info(f"[TimeIndexedMemory] 角色 '{lanlan_name}' 不在配置中，使用默认路径: {db_path}")
 
             self.db_paths[lanlan_name] = db_path
@@ -122,7 +121,6 @@ class TimeIndexedMemory:
         connection_string = f"sqlite:///{db_path}"
         
         original_table = self._validate_table_name(TIME_ORIGINAL_TABLE_NAME)
-        compressed_table = self._validate_table_name(TIME_COMPRESSED_TABLE_NAME)
         
         origin_history = SQLChatMessageHistory(
             connection_string=connection_string,
@@ -130,22 +128,12 @@ class TimeIndexedMemory:
             table_name=original_table,
         )
 
-        compressed_history = SQLChatMessageHistory(
-            connection_string=connection_string,
-            session_id=event_id,
-            table_name=compressed_table,
-        )
-
         origin_history.add_messages(messages)
-        compressed_history.add_message(SystemMessage((await self.recent_history_manager.compress_history(messages, lanlan_name))[1]))
+        # NOTE: compressed table 写入已废弃，fact/reflection 层已取代其功能
 
         with self.engines[lanlan_name].connect() as conn:
             conn.execute(
                 text(f"UPDATE {original_table} SET timestamp = :timestamp WHERE session_id = :session_id"),
-                {"timestamp": timestamp, "session_id": event_id}
-            )
-            conn.execute(
-                text(f"UPDATE {compressed_table} SET timestamp = :timestamp WHERE session_id = :session_id"),
                 {"timestamp": timestamp, "session_id": event_id}
             )
             conn.commit()
@@ -157,16 +145,33 @@ class TimeIndexedMemory:
             raise ValueError(f"不合法的表名: {table_name}")
         return table_name
 
+    def get_last_conversation_time(self, lanlan_name: str) -> datetime | None:
+        """查询指定角色最后一次对话的时间戳。无记录时返回 None。"""
+        if not self._ensure_engine_exists(lanlan_name):
+            return None
+        table_name = self._validate_table_name(TIME_ORIGINAL_TABLE_NAME)
+        try:
+            with self.engines[lanlan_name].connect() as conn:
+                result = conn.execute(
+                    text(f"SELECT MAX(timestamp) FROM {table_name}")
+                )
+                row = result.fetchone()
+                if row and row[0]:
+                    ts = row[0]
+                    if isinstance(ts, str):
+                        try:
+                            return datetime.fromisoformat(ts)
+                        except ValueError:
+                            return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f")
+                    if isinstance(ts, datetime):
+                        return ts
+        except Exception as e:
+            logger.warning(f"[TimeIndexedMemory] 查询最后对话时间失败: {e}")
+        return None
+
     def retrieve_summary_by_timeframe(self, lanlan_name, start_time, end_time):
-        if lanlan_name not in self.engines:
-            return []
-        table_name = self._validate_table_name(TIME_COMPRESSED_TABLE_NAME)
-        with self.engines[lanlan_name].connect() as conn:
-            result = conn.execute(
-                text(f"SELECT session_id, message FROM {table_name} WHERE timestamp BETWEEN :start_time AND :end_time"),
-                {"start_time": start_time, "end_time": end_time}
-            )
-            return result.fetchall()
+        """[已废弃] compressed table 不再写入，fact/reflection 已取代。"""
+        return []
 
     def retrieve_original_by_timeframe(self, lanlan_name, start_time, end_time):
         if lanlan_name not in self.engines:
@@ -179,3 +184,84 @@ class TimeIndexedMemory:
                 {"start_time": start_time, "end_time": end_time}
             )
             return result.fetchall()
+
+    # ── FTS5 事实索引 ─────────────────────────────────────────────
+
+    FACTS_FTS_TABLE = "facts_fts"
+
+    def _ensure_fts_table(self, lanlan_name: str) -> None:
+        """确保 FTS5 虚拟表存在。unicode61 分词器对中文做字级别索引，零依赖。"""
+        if not self._ensure_engine_exists(lanlan_name):
+            return
+        try:
+            with self.engines[lanlan_name].connect() as conn:
+                conn.execute(text(
+                    f"CREATE VIRTUAL TABLE IF NOT EXISTS {self.FACTS_FTS_TABLE} "
+                    f"USING fts5(fact_id, content, tokenize='unicode61')"
+                ))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"[TimeIndexedMemory] 创建 FTS5 表失败: {e}")
+
+    def index_fact(self, lanlan_name: str, fact_id: str, content: str) -> None:
+        """将事实插入 FTS5 索引。"""
+        if not self._ensure_engine_exists(lanlan_name):
+            return
+        self._ensure_fts_table(lanlan_name)
+        try:
+            with self.engines[lanlan_name].connect() as conn:
+                # 先检查是否已存在
+                result = conn.execute(
+                    text(f"SELECT fact_id FROM {self.FACTS_FTS_TABLE} WHERE fact_id = :fid"),
+                    {"fid": fact_id}
+                )
+                if result.fetchone():
+                    return  # 已索引
+                conn.execute(
+                    text(f"INSERT INTO {self.FACTS_FTS_TABLE}(fact_id, content) VALUES(:fid, :content)"),
+                    {"fid": fact_id, "content": content}
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"[TimeIndexedMemory] 索引事实失败: {e}")
+
+    def search_facts(self, lanlan_name: str, query: str, limit: int = 10) -> list[tuple[str, float]]:
+        """通过 FTS5 BM25 搜索事实。返回 [(fact_id, bm25_score), ...]。
+
+        BM25 分数为负值，越接近 0 越相关。
+        """
+        if not self._ensure_engine_exists(lanlan_name):
+            return []
+        self._ensure_fts_table(lanlan_name)
+        try:
+            # 转义 FTS5 特殊字符
+            safe_query = query.replace('"', '""')
+            with self.engines[lanlan_name].connect() as conn:
+                result = conn.execute(
+                    text(
+                        f"SELECT fact_id, bm25({self.FACTS_FTS_TABLE}) as score "
+                        f"FROM {self.FACTS_FTS_TABLE} "
+                        f'WHERE {self.FACTS_FTS_TABLE} MATCH :query '
+                        f"ORDER BY score LIMIT :limit"
+                    ),
+                    {"query": safe_query, "limit": limit}
+                )
+                return [(row[0], row[1]) for row in result.fetchall()]
+        except Exception as e:
+            logger.debug(f"[TimeIndexedMemory] FTS5 搜索失败（可能是查询为空或语法）: {e}")
+            return []
+
+    def delete_fact_from_index(self, lanlan_name: str, fact_id: str) -> None:
+        """从 FTS5 索引中移除事实。"""
+        if not self._ensure_engine_exists(lanlan_name):
+            return
+        self._ensure_fts_table(lanlan_name)
+        try:
+            with self.engines[lanlan_name].connect() as conn:
+                conn.execute(
+                    text(f"DELETE FROM {self.FACTS_FTS_TABLE} WHERE fact_id = :fid"),
+                    {"fid": fact_id}
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"[TimeIndexedMemory] 删除 FTS5 索引失败: {e}")
